@@ -1,2 +1,7 @@
+2005-03-04 Bert Vincent <bert@bic.mni.mcgill.ca>
+	* Added epm-header
+	* Added man page
+	* Hacked configure.ac and Makefile.am (in)appropriately.
+	
 2005-02-11 Bert Vincent <bert@bic.mni.mcgill.ca>
 	* Checked hacked-up version of postf sources into CVS
