@@ -1,0 +1,269 @@
+.\" Hey, EMACS, this here is: -*- nroff -*-
+.\" Copyright 2005 Gabriel C. Leger and Robert D. Vincent, McConnell 
+.\" Brain Imaging Centre, Montreal Neurological Institute, McGill University.
+.\" Permission to use, copy, modify, and distribute this
+.\" software and its documentation for any purpose and without
+.\" fee is hereby granted, provided that the above copyright
+.\" notice appear in all copies.  The author and McGill University
+.\" make no representations about the suitability of this
+.\" software for any purpose.  It is provided "as is" without
+.\" express or implied warranty.
+.\"
+.\" $Header: /private-cvsroot/visualization/postf/postf.man1,v 1.1 2005-03-04 21:32:38 bert Exp $
+.\"
+.TH postf 1 "Mar 03, 2005" "Rev: 1.0.01"
+.SH NAME
+.B postf
+a medical image display utility.
+
+.SH SYNOPSIS
+.B postf
+.I [filename] [-title <window-title] [-debug] [-noprogress]
+.I [-cindex <min> <max>] [-frames <n>] [-frame <n>] [-rframes <min> <max>]
+.I [-slices <n>] [-rslices <min> <max>] [-width <n>] [-height <n>] 
+.I [-roi_radius <r>] [-dynamic] [-images <n>] 
+.I [-spectral | -hotmetal | -grayscale] [-describe] [-help] [-version]
+
+.SH DESCRIPTION 
+
+The program 
+.B postf
+displays slices through a static or dynamic volume of
+images. It will read data from both minc and mni format files,
+automatically detecting the file type. If no file name is given, then
+raw single-precision floating point values are read from standard
+input. To obtain information on command-line arguments, invoke 
+.B postf
+with the 
+.I -help
+option.
+
+.B postf
+does not have a conventional user-interface.  Instead,
+operations are invoked by simple key presses and mouse motion. These
+commands are described below. Note that there are two areas of the
+window that can behave slightly differently: the image area and the
+colour-bar area - these differences are noted in the command
+descriptions.
+
+.SH OPTIONS
+.TP 
+.BI -title " window-title"
+Set the title of the main window.  The default title is the name of the
+file specified on the command line.
+.TP 
+.BI -cindex " min max"
+Set minimum and maximum colour lookup table indices.  The defaults are 64
+and 255.
+.TP
+.BI -frames " n"
+Set the number of dynamic data frames.
+.TP
+.BI -frame " n"
+Display frame 
+.IR n " initially."
+.TP
+.BI -rframes " min max"
+Read in frames from 
+.IR "min " "through " "max " only.
+.TP
+.BI -slices " n"
+Set the number of data slices to 
+.IR n .
+.TP
+.BI -slice " n"
+Display slice 
+.IR "n " initially.
+.TP
+.BI -rslices " min max"
+Read in slices from 
+.IR "min " "through " "max " only.
+.TP
+.BI -width " n"
+Set the width of the image to 
+.IR n .
+.TP
+.BI -height " n"
+Set the height of the image to 
+.IR n .
+.TP
+.BI -roi_radius " r"
+Set the initial region of interest radius to 
+.IR "r " voxels.
+.TP
+.B -dynamic
+Time information is available within float data stream.
+.TP
+.BI -images " n"
+Number of images in float data stream.
+.TP
+.B -spectral
+Use spectral colour map.
+.TP
+.B -hotmetal
+Use hotmetal colour map.
+.TP
+.B -grayscale
+Use grayscale colour map.
+.TP
+.B -describe
+Print user interface description.
+.TP
+.B -debug
+Output MINC file information.
+.TP
+.B -noprogress
+Do not print progress information during MINC image input.
+.TP
+.B -help
+Print summary of command-line options and exit.
+.TP
+.B -version
+Print the program's version number and exit.
+
+.SH USER INTERFACE 
+
+The visible user interface of the program consists of three possible
+windows: the main window, the time-activity popup, and the activity
+cross section popup.  When the program is started, only the main window
+is displayed initially.
+
+The main window consists of two main parts, the large slice image display on
+the left side of the window, and the colour bar and position information
+displayed on the right side of the window.  The information displayed
+along with the color bar includes the following:
+.TP
+.BI x= n
+The current x position of the cursor, in voxel coordinates
+.TP
+.BI y= n
+The current y position of the cursor, in voxel coordinates
+.TP
+.BI v= n
+The value of the voxel at the current cursor position
+.TP
+.BI a= n
+The area of the region of interest, in voxels.
+.TP
+.BI f: " n"
+The current frame number
+.TP
+.BI s: " n"
+The current slice number
+
+.SH Mouse 
+.TP 
+.B left mouse button
+When the mouse cursor is in the slice image: Evaluate (and move) current
+pixel.  When the mouse cursor is in the colour bar: Move top of colour
+bar.
+.TP
+.B middle mouse button
+When the mouse cursor is in the slice image: Move whole image in
+viewport When the mouse cursor is in the colour bar: Move top and bottom
+of colour bar together.
+.TP
+.B right mouse button
+When the mouse cursor is in the colour bar: move bottom of colour bar.
+.TP
+.B left and right mouse buttons
+When the mouse cursor is in the slice image: Print time-activity curve
+for the current pixel on the standard output. This feature is only 
+functional when the time-activity pop-up window is displayed.
+
+.SH Arrow keys
+.TP
+.B right-arrow
+Move to next frame
+.TP
+.B left-arrow
+Move to previous frame
+.TP
+.B up-arrow
+Move to next slice
+.TP
+.B down-arrow
+Move to previous slice
+.TP 
+.B shift+arrow
+Move through images without redrawing
+.TP
+.B ctrl+arrow
+Move current voxel by one
+.TP
+.B ctrl+shift+arrow
+Move current voxel by four
+.TP
+.B alt+right-arrow
+increase region of interest radius by one
+.TP
+.B alt+left-arrow
+decrease region of interest radius by one
+
+.SH Keyboard 
+Unless otherwise noted, case is ignored.
+.TP
+.B Esc
+Exit program
+.TP
+.B q
+Exit program
+.TP
+.B h
+Set colour map to hotmetal
+.TP
+.B g
+Set colour map to grayscale
+.TP
+.B s
+Set colour map to spectral
+.TP
+.B r
+Reset colour bar values
+.TP
+.B R
+Reset image position and size
+.TP
+.B p
+Pop up a window displaying x, y, and z activity profiles through
+current voxel
+.TP
+.B d
+Pop up a window displaying a time-activity curve for the current
+voxel
+.TP
+.B x
+Toggle display of x activity profile
+.TP
+.B y
+Toggle display of y activity profile
+.TP
+.B z
+Toggle display of z activity profile
+.TP
+.B m
+Locate image containing maximum value (MNI and float data only).
+.TP
+.B M
+Locate image containing minimum value (MNI and float data only).
+.TP
+.B \-
+Zoom out from image
+.TP
+.B \+
+Zoom in to image
+.TP
+.B space
+Print out time-activity curve for current voxel on the standard
+output. Only functional when the time-activity pop-up window is
+displayed.
+
+.SH SEE ALSO
+.IR xdisp , register
+
+.SH AUTHOR
+Gabriel C. Leger
+
+.SH COPYRIGHT
+Copyright \(co 1995-2005 by Gabriel C. Leger
+
