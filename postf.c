@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.7  2005-03-17 17:27:27  bert
+   @MODIFIED   : Revision 1.8  2005-03-17 17:57:22  bert
+   @MODIFIED   : Minor changes to completely remove need for volume_io
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.7  2005/03/17 17:27:27  bert
    @MODIFIED   : Get rid of compilation warnings whereever possible.
    @MODIFIED   :
    @MODIFIED   : Revision 1.6  2005/03/17 16:58:12  bert
@@ -114,7 +117,7 @@
 #endif
 
 #define MINC_PLAY_NICE 1        /* Don't pollute my namespace!! */
-#include <volume_io.h>
+#include <minc.h>
 
 
 /* Set to 1 if you want to enable the somewhat experimental resampling code.
@@ -123,7 +126,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.7 2005-03-17 17:27:27 bert Exp $";
+static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.8 2005-03-17 17:57:22 bert Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -147,8 +150,9 @@ static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf
                             PointerMotionMask | \
                             StructureNotifyMask)
 
-#define MIN(a,b) (((a) < (b)) ? (a) : (b))
-#define MAX(a,b) (((a) < (b)) ? (b) : (a))
+#define _MIN(a,b) (((a) < (b)) ? (a) : (b))
+#define _MAX(a,b) (((a) < (b)) ? (b) : (a))
+typedef int _BOOL;
 
 #define POSTF_X_VISUAL_DEPTH 24
 #define POSTF_X_VISUAL_CLASS TrueColor
@@ -573,7 +577,7 @@ typedef struct {
   int TimeDim;
 } MincInfo;
 
-MincInfo *open_minc_file(char *minc_filename, VIO_BOOL progress, VIO_BOOL debug)
+MincInfo *open_minc_file(char *minc_filename, _BOOL progress, _BOOL debug)
 {
   
   int
@@ -591,7 +595,7 @@ MincInfo *open_minc_file(char *minc_filename, VIO_BOOL progress, VIO_BOOL debug)
   
   nc_type datatype;
   MincInfo *MincFile;
-  VIO_BOOL
+  _BOOL
     frames_present = FALSE,
     slices_present = FALSE;
   
@@ -751,14 +755,14 @@ int read_minc_data(MincInfo *MincFile,
                    int      *user_frame_list,
                    int      user_frame_count,
                    int      images_to_get,
-                   VIO_BOOL  frames_present,
+                   _BOOL  frames_present,
                    float    *frame_time,
                    float    *frame_length,
                    float    *min,
                    float    *max,
                    unsigned short *dynamic_volume,
-                   VIO_BOOL  progress,
-                   VIO_BOOL  debug)
+                   _BOOL  progress,
+                   _BOOL  debug)
 {
   int
     frame,
@@ -790,7 +794,7 @@ int read_minc_data(MincInfo *MincFile,
   
   if (progress){
     fprintf(stderr, "Reading minc data ");
-    notice_every = images_to_get/MAX(user_slice_count,user_frame_count);
+    notice_every = images_to_get/_MAX(user_slice_count,user_frame_count);
     if (notice_every == 0) notice_every = 1;
   }
   
@@ -949,7 +953,7 @@ void read_mni_data(MniInfo  *MniFile,
                   int      *user_frame_list,
                   int      user_frame_count,
                   int      images_to_get,
-                  VIO_BOOL  frames_present,
+                  _BOOL  frames_present,
                   float    *frame_time,
                   float    *frame_length,
                   float    *min,
@@ -959,8 +963,8 @@ void read_mni_data(MniInfo  *MniFile,
                   int      *min_frame,
                   int      *max_frame,
                   unsigned short *dynamic_volume,
-                  VIO_BOOL  progress,
-                  VIO_BOOL  debug)
+                  _BOOL  progress,
+                  _BOOL  debug)
      
 {
   int 
@@ -968,7 +972,7 @@ void read_mni_data(MniInfo  *MniFile,
     mni_image, user_image,
     pixel_count,
     notice_every;
-  VIO_BOOL 
+  _BOOL 
     scale = FALSE;
   float 
     image_min, image_max,
@@ -980,7 +984,7 @@ void read_mni_data(MniInfo  *MniFile,
   unsigned short
     *present_short;
   
-  notice_every = images_to_get/MAX(MniFile->Slices,MniFile->Frames);
+  notice_every = images_to_get/_MAX(MniFile->Slices,MniFile->Frames);
   if (notice_every == 0) notice_every = 1;
 
   if (progress){
@@ -1032,7 +1036,7 @@ void read_mni_data(MniInfo  *MniFile,
 
   if (progress) fprintf(stderr, " done\n");
 
-  notice_every = images_to_get/MAX(user_frame_count,user_slice_count);
+  notice_every = images_to_get/_MAX(user_frame_count,user_slice_count);
   if (notice_every == 0) notice_every = 1;
 
   range_factor = (float)index_range / (*max - *min);
@@ -1897,7 +1901,7 @@ void draw_profile(struct postf_wind *wnd_ptr,
     icf = cfact;
     ict = cterm;
     id = dynamic_volume;
-    x_step = (float)MAX(iw,ih)/islices;
+    x_step = (float)_MAX(iw,ih)/islices;
     z_step = iframes*is;
   }
   else{
@@ -2013,10 +2017,10 @@ int get_roi_tac(unsigned short *dynamic_volume,
     lroi_radius = roi_radius;
     lx = x; ly = y;
 
-    istart = MAX(0, x-roi_radius);
-    istop  = MIN(image_width-1, x+roi_radius);
-    jstart = MAX(0, y-roi_radius);
-    jstop  = MIN(image_height-1, y+roi_radius);
+    istart = _MAX(0, x-roi_radius);
+    istop  = _MIN(image_width-1, x+roi_radius);
+    jstart = _MAX(0, y-roi_radius);
+    jstop  = _MIN(image_height-1, y+roi_radius);
 
     r2 = roi_radius * roi_radius;
     roi_area = (istart-istop+1) * (jstart-jstop+1);
@@ -2745,7 +2749,7 @@ main(int argc, char *argv[])
     MniInfo *MniFile = NULL;
     static char default_window_title[] = "stdin";
   
-    VIO_BOOL quit;
+    _BOOL quit;
   
     FILE *input_fp;
   
@@ -3094,10 +3098,10 @@ main(int argc, char *argv[])
   XFillRectangle(_xDisplay, main_window->draw, main_window->gc, 0, 0, 
                  WINDOW_WIDTH+COLOR_BAR_WINDOW, WINDOW_HEIGHT);
   
-  initial_zoom = zoom = (float)MIN(WINDOW_WIDTH/image_width,WINDOW_HEIGHT/image_height);
+  initial_zoom = zoom = (float)_MIN(WINDOW_WIDTH/image_width,WINDOW_HEIGHT/image_height);
   image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
   clipping_buffer = malloc(sizeof(*clipping_buffer) * image_size);
-  draw_axes(NULL, 0, MAX(image_width, image_height), min, max,
+  draw_axes(NULL, 0, _MAX(image_width, image_height), min, max,
             NIL,NIL,NIL,NIL,NIL,PROFILE,INITIALIZE);
   draw_axes(NULL, frame_time[0], frame_time[user_frame_count-1],
             min,max,NIL,NIL,NIL,NIL,NIL,DYNAMIC,INITIALIZE);
@@ -3202,7 +3206,7 @@ main(int argc, char *argv[])
                   main_window->vh != event.xconfigure.height) {
                   main_window->vw = event.xconfigure.width;
                   main_window->vh = event.xconfigure.height;
-                  zoom = (float)MIN((main_window->vw-COLOR_BAR_WINDOW)/image_width,main_window->vh/image_height);
+                  zoom = (float)_MIN((main_window->vw-COLOR_BAR_WINDOW)/image_width,main_window->vh/image_height);
                   must_redraw_main = TRUE;
               }
           }
@@ -3329,7 +3333,7 @@ main(int argc, char *argv[])
                       }
                   }
                   else if (altkey_down) {
-                      roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
+                      roi_radius = _MIN(MAX_ROI_RADIUS,roi_radius+1);
                       draw_cursor(main_window, mouse_position, roi_radius * zoom);
                       if (in_subwindow(mouse_position,image_subwindow)){
                           must_evaluate_pixel = TRUE;
@@ -3364,7 +3368,7 @@ main(int argc, char *argv[])
                           }
                       }
                       else if (altkey_down){
-                          roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
+                          roi_radius = _MIN(MAX_ROI_RADIUS,roi_radius+1);
                           draw_cursor(main_window, mouse_position, roi_radius * zoom);
                           if (in_subwindow(mouse_position,image_subwindow)){
                               must_evaluate_pixel = TRUE;
@@ -3400,7 +3404,7 @@ main(int argc, char *argv[])
                           }
                       }
                       else if (altkey_down){
-                          roi_radius = MAX(0,roi_radius-1);
+                          roi_radius = _MAX(0,roi_radius-1);
                           must_redraw_main = TRUE;
                           if (in_subwindow(mouse_position,image_subwindow)){
                               must_evaluate_pixel = TRUE;
@@ -3436,7 +3440,7 @@ main(int argc, char *argv[])
                           }
                       }
                       else if (altkey_down){
-                          roi_radius = MAX(0,roi_radius-1);
+                          roi_radius = _MAX(0,roi_radius-1);
                           draw_cursor(main_window, mouse_position, roi_radius * zoom);
                           if (in_subwindow(mouse_position,image_subwindow)){
                               must_evaluate_pixel = TRUE;
@@ -3540,7 +3544,7 @@ main(int argc, char *argv[])
                   if (profile_window == NULL) {
                       profile_window = create_window(window_title,
                                                      0,
-                                                     MAX(image_width,image_height),
+                                                     _MAX(image_width,image_height),
                                                      min,
                                                      max,
                                                      axes,
