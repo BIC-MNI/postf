@@ -1,6 +1,6 @@
-AC_INIT
+AC_INIT(postf, 1.0.02-test, [bert@bic.mni.mcgill.ca])
 AC_CONFIG_SRCDIR([./postf.c])
-AM_INIT_AUTOMAKE(postf,1.0.02)
+AM_INIT_AUTOMAKE
 AC_CONFIG_HEADERS([config.h])
 
 AC_PROG_CC

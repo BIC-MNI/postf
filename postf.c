@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.4  2005-03-10 23:54:43  bert
+   @MODIFIED   : Revision 1.5  2005-03-16 17:51:48  bert
+   @MODIFIED   : Latest changes to autoconf stuff and X port
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.4  2005/03/10 23:54:43  bert
    @MODIFIED   : Major cleanup and speedup
    @MODIFIED   :
    @MODIFIED   : Revision 1.3  2005/03/10 20:11:24  bert
@@ -100,18 +103,23 @@
  * Some definitions for the use of Dave globals routines
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 #include <volume_io.h>
 
 
 /* Set to 1 if you want to enable the somewhat experimental resampling code.
  */
+#ifndef DO_RESAMPLE
 #define DO_RESAMPLE 0
+#endif
 
 #undef X
 #undef Y
 
 #ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.4 2005-03-10 23:54:43 bert Exp $";
+static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.5 2005-03-16 17:51:48 bert Exp $";
 #endif
 
 #include <stdio.h>
@@ -119,8 +127,6 @@ static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1
 #include <string.h>
 #include <float.h>
 #include <math.h>
-
-#define FLIPY(wnd_ptr, y) (wnd_ptr->vh - (y) - 1)
 
 #include <X11/X.h>
 #include <X11/Xlib.h>
@@ -225,6 +231,7 @@ int debug_level = 2;
 #define PROFILE 1
 #define DYNAMIC 2
 
+#define COLOR_BAR_TOP 84
 #define COLOR_BAR_WIDTH 16
 #define COLOR_BAR_XOFFSET 16
 #define COLOR_BAR_YOFFSET 64
@@ -244,9 +251,9 @@ int debug_level = 2;
 #define TIC_REDUCTION 10
 #define SCALE_STEP (COLOR_BAR_HEIGHT/SCALE_TICS)
 #define EVAL_XCOORD (WINDOW_WIDTH+COLOR_BAR_XOFFSET)
-#define EVAL_YCOORD (WINDOW_HEIGHT-(COLOR_BAR_YOFFSET/4))
+#define EVAL_YCOORD (COLOR_BAR_YOFFSET/4-1)
 #define SCALE_XCOORD (WINDOW_WIDTH+COLOR_BAR_XOFFSET)
-#define SCALE_YCOORD (COLOR_BAR_YOFFSET*2/3)
+#define SCALE_YCOORD (COLOR_BAR_TOP+COLOR_BAR_HEIGHT+(COLOR_BAR_YOFFSET/3))
 #define TEXT_SEP (COLOR_BAR_YOFFSET/4)
 #define LOOSE 10
 
@@ -509,7 +516,7 @@ get_mouse_ptr(struct postf_wind *wnd_ptr, int mouse_position[XY])
                   &x_root, &y_root,
                   &mouse_position[X], &mouse_position[Y],
                   &mask);
-    mouse_position[Y] = FLIPY(wnd_ptr, mouse_position[Y]);
+    mouse_position[Y] = mouse_position[Y];
     return (mask);
 }
 
@@ -1292,22 +1299,27 @@ in_subwindow(int *position, int *window)
             );
 }
 
+#define COLOR_BAR_BOTTOM (COLOR_BAR_HEIGHT+COLOR_BAR_TOP)
+
+float
+get_scaled_position(short position)
+{
+    if (position > COLOR_BAR_BOTTOM) 
+        position = COLOR_BAR_BOTTOM;
+    if (position < COLOR_BAR_TOP) 
+        position = COLOR_BAR_TOP;
+  
+    return (float)(COLOR_BAR_BOTTOM - position) / COLOR_BAR_HEIGHT;
+}
+
 float 
 get_color(short position, float low, float high)
 {
-    static float
-        bottom = COLOR_BAR_YOFFSET,
-        top = COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT,
-        range = COLOR_BAR_HEIGHT;
     float scaled_position, m, b;
   
     m = 1 / (high - low);
     b = -m * low;
   
-    if (position < bottom) position = bottom;
-    if (position > top) position = top;
-  
-    scaled_position = (position - bottom) / range;
     return (m * scaled_position + b);
 }
 
@@ -1317,7 +1329,7 @@ new_scale_slope(short position, float *low, float *high, int anchor,
 {
     float scaled_position, m, b;
 
-    scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
+    scaled_position = get_scaled_position(position);
     switch (anchor){
     case BOTTOM:
         b = (scaled_position - *low);
@@ -1347,7 +1359,8 @@ translate_scale(short position, float *low, float *high, float moving_color)
 {
     float scaled_position, m, b;
   
-    scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
+    scaled_position = get_scaled_position(position);
+
     m = 1 / (*high - *low);
     b = moving_color - m * scaled_position;
     *low = -b / m;
@@ -1549,11 +1562,6 @@ void
 write_eval_pixel(struct postf_wind *wnd_ptr,
                  short x, short y, float v, int a, int redraw_only)
 {
-  static int
-    cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
-    cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
-    cbottom = WINDOW_HEIGHT-COLOR_BAR_YOFFSET,
-    ctop = WINDOW_HEIGHT;
   char out_string[MAX_STRING_LENGTH];
   static short lx,ly;
   static int la;
@@ -1568,34 +1576,35 @@ write_eval_pixel(struct postf_wind *wnd_ptr,
 
   XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
   XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
-                 cleft, FLIPY(wnd_ptr, ctop), 
-                 cright-cleft,ctop-cbottom);
+                 WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
+                 0,
+                 COLOR_BAR_WINDOW-COLOR_BAR_XOFFSET/2,COLOR_BAR_YOFFSET);
   
   XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
 
   sprintf(out_string,"x=%d",lx);
   XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
               EVAL_XCOORD, 
-              FLIPY(wnd_ptr, EVAL_YCOORD),
+              EVAL_YCOORD,
               out_string, strlen(out_string));
   
   sprintf(out_string,"y=%d",ly);
   XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
               EVAL_XCOORD, 
-              FLIPY(wnd_ptr, EVAL_YCOORD-TEXT_SEP),
+              EVAL_YCOORD+TEXT_SEP,
               out_string, strlen(out_string));
   
   
   sprintf(out_string,"v=%g",lv);
   XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
               EVAL_XCOORD, 
-              FLIPY(wnd_ptr, EVAL_YCOORD-2*TEXT_SEP),
+              EVAL_YCOORD+2*TEXT_SEP,
               out_string, strlen(out_string));
   
   sprintf(out_string,"a=%d",la);
   XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
               EVAL_XCOORD, 
-              FLIPY(wnd_ptr, EVAL_YCOORD-3*TEXT_SEP),
+              EVAL_YCOORD+3*TEXT_SEP,
               out_string, strlen(out_string));
 }
 
@@ -1604,33 +1613,30 @@ write_scale(struct postf_wind *wnd_ptr,
             float low, float high, 
             int frame, int slice, int frame_offset, int slice_offset)
 {
-    static int
-        cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
-        cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
-        cbottom = 0,
-        ctop = COLOR_BAR_YOFFSET - TEXT_SEP + 3; /* Why? Because it's right! */
     char out_string[MAX_STRING_LENGTH];
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
-    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, cleft, 
-                   FLIPY(wnd_ptr, ctop),
-                   cright-cleft, ctop-cbottom);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+                   WINDOW_WIDTH+COLOR_BAR_XOFFSET/2, 
+                   COLOR_BAR_TOP+COLOR_BAR_HEIGHT+3,
+                   COLOR_BAR_WINDOW-COLOR_BAR_XOFFSET/2, 
+                   COLOR_BAR_YOFFSET);
                  
     XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
 
     sprintf(out_string,"max = %3.0f%%", high * 100.0);
     XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
-                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD), 
+                SCALE_XCOORD, SCALE_YCOORD, 
                 out_string, strlen(out_string));
   
     sprintf(out_string,"min = %3.0f%%",low * 100.0);
     XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
-                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-TEXT_SEP), 
+                SCALE_XCOORD, SCALE_YCOORD+TEXT_SEP, 
                 out_string, strlen(out_string));
   
     sprintf(out_string,"f: %2d  s: %2d",frame+frame_offset,slice+slice_offset);
     XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
-                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-2*TEXT_SEP), 
+                SCALE_XCOORD, SCALE_YCOORD+2*TEXT_SEP, 
                 out_string, strlen(out_string));
 }
 
@@ -1900,7 +1906,7 @@ void draw_profile(struct postf_wind *wnd_ptr,
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ProfileBackgroundColor);
     XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0,
-                   AUXILLARY_WINDOW_WIDTH, AUXILLARY_WINDOW_HEIGHT);
+                   wnd_ptr->vw, wnd_ptr->vh);
 
     if (plot_present || !redraw_only){
         XPoint pt[512];         /* TODO: Count better not be > 512! */
@@ -2101,7 +2107,7 @@ void draw_dynamic(struct postf_wind *wnd_ptr,
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ProfileBackgroundColor);
     XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0,
-                   AUXILLARY_WINDOW_WIDTH, AUXILLARY_WINDOW_HEIGHT);
+                   wnd_ptr->vw, wnd_ptr->vh);
 
     if (plot_present || !redraw_only){
       
@@ -2229,11 +2235,6 @@ calculate_conversions(float min,float max,float *cfact,float *cterm)
 void 
 draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
 {
-    static int
-        left = 0,
-        right = WINDOW_WIDTH-1,
-        bottom = 0,
-        top = WINDOW_HEIGHT-1;
     long point[XY];
     static int o_r = 0;
     static int o_x = -1, o_y = -1;
@@ -2246,24 +2247,24 @@ draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
         if (o_r != 0) {
             XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                      o_x-o_r,
-                     FLIPY(wnd_ptr, o_y+o_r),
+                     o_y+o_r,
                      2*o_r,
                      2*o_r,
                      0,
                      360*64);
         }
         else {
-            pt[0].x = left;
-            pt[0].y = FLIPY(wnd_ptr, o_y);
-            pt[1].x = right;
-            pt[1].y = FLIPY(wnd_ptr, o_y);
+            pt[0].x = 0;
+            pt[0].y = o_y;
+            pt[1].x = wnd_ptr->vw-COLOR_BAR_WINDOW;
+            pt[1].y = o_y;
             XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                        pt, 2, CoordModeOrigin);
 
             pt[0].x = o_x;
-            pt[0].y = FLIPY(wnd_ptr, bottom);
+            pt[0].y = 0;
             pt[1].x = o_x;
-            pt[1].y = FLIPY(wnd_ptr, top);
+            pt[1].y = wnd_ptr->vh;
             XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                        pt, 2, CoordModeOrigin);
         }
@@ -2272,31 +2273,31 @@ draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
     }
   
     if (position != NULL) {
-        if (position[X] > left && position[X] < right && 
-            position[Y] > bottom && position[Y] < top){
+        if (position[X] > 0 && position[X] < wnd_ptr->vw && 
+            position[Y] > 0 && position[Y] < wnd_ptr->vh){
  
             if (radius != 0) {
                 XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                          position[X]-radius,
-                         FLIPY(wnd_ptr, position[Y]+radius),
+                         position[Y]+radius,
                          2*radius,
                          2*radius,
                          0,
                          360*64);
             }
             else {
-                pt[0].x = left;
-                pt[0].y = FLIPY(wnd_ptr, position[Y]);
-                pt[1].x = right;
-                pt[1].y = FLIPY(wnd_ptr, position[Y]);
+                pt[0].x = 0;
+                pt[0].y = position[Y];
+                pt[1].x = wnd_ptr->vw-COLOR_BAR_WINDOW;
+                pt[1].y = position[Y];
 
                 XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                            pt, 2, CoordModeOrigin);
 
                 pt[0].x = position[X];
-                pt[0].y = FLIPY(wnd_ptr, bottom);
+                pt[0].y = 0;
                 pt[1].x = position[X];
-                pt[1].y = FLIPY(wnd_ptr, top);
+                pt[1].y = wnd_ptr->vh;
 
                 XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                            pt, 2, CoordModeOrigin);
@@ -2336,7 +2337,7 @@ draw_color_bar(struct postf_wind *wnd_ptr,
     }
     XPutImage(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, xi, 0, 0,
               WINDOW_WIDTH+COLOR_BAR_XOFFSET,
-              84, COLOR_BAR_WIDTH, COLOR_BAR_HEIGHT);
+              COLOR_BAR_TOP, COLOR_BAR_WIDTH, COLOR_BAR_HEIGHT);
     XDestroyImage(xi);
     
     x = WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH;
@@ -2346,13 +2347,13 @@ draw_color_bar(struct postf_wind *wnd_ptr,
         y = (float)step * SCALE_STEP + COLOR_BAR_YOFFSET;
         sprintf(scale_string,"-%-7.1f", range * step + min);
         XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
-                    x, FLIPY(wnd_ptr, y-4), 
+                    x, wnd_ptr->vh - (y-4) - 1,
                     scale_string, strlen(scale_string));
     }
 
     XDrawRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
                    WINDOW_WIDTH+COLOR_BAR_XOFFSET,
-                   84,          /* TODO: Why??? */
+                   COLOR_BAR_TOP,
                    COLOR_BAR_WIDTH,
                    COLOR_BAR_HEIGHT);
 }
@@ -2389,11 +2390,6 @@ draw_image(struct postf_wind *wnd_ptr,
         new_origin[XY],
         new_width,
         new_height;
-    static int
-        cleft = 0,
-        cright = WINDOW_WIDTH,
-        cbottom = 0,
-        ctop = WINDOW_HEIGHT;
     XImage *xi;
     int x, y;
     unsigned short *tptr;
@@ -2401,8 +2397,8 @@ draw_image(struct postf_wind *wnd_ptr,
     double izoom;               /* inverse of zoom */
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
-    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0, WINDOW_WIDTH,
-                   WINDOW_HEIGHT);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0, 
+                   wnd_ptr->vw-COLOR_BAR_WINDOW, wnd_ptr->vh);
 
     if (draw_origin[X] < 0 || draw_origin[Y] < 0){
         if (draw_origin[X] < 0){
@@ -2512,6 +2508,7 @@ create_basic_window(char *window_name, int width, int height)
     struct postf_wind *wnd_ptr;
     int a, b;
     int blackColor = BlackPixel(_xDisplay, _xScreen);
+    XSizeHints hints;
 
     wnd_ptr = malloc(sizeof(struct postf_wind));
     if (wnd_ptr == NULL) {
@@ -2530,6 +2527,13 @@ create_basic_window(char *window_name, int width, int height)
                                         blackColor);
     XStoreName(_xDisplay, wnd_ptr->wind, window_name);
     wnd_ptr->gc = XCreateGC(_xDisplay, wnd_ptr->wind, 0, NULL);
+
+    hints.flags = (PMinSize | PMaxSize);
+    hints.min_width = width;
+    hints.max_width = width;
+    hints.min_height = height;
+    hints.max_height = height;
+    XSetWMNormalHints(_xDisplay, wnd_ptr->wind, &hints);
 
     if (XdbeQueryExtension(_xDisplay, &a, &b)) {
         wnd_ptr->draw = XdbeAllocateBackBufferName(_xDisplay, 
@@ -2689,6 +2693,7 @@ main(int argc, char *argv[])
     static void (*present_scale)(float, float *) = 0;
   
     static ArgvInfo argTable[] = {
+        { NULL, ARGV_VERINFO, PACKAGE_VERSION, NULL, NULL },
         { "-title", ARGV_STRING, (char *) NULL, (char *) &window_title,
           "Window title" },
         { "-mni", ARGV_CONSTANT, (char *) TRUE, (char *) &mni_data,
@@ -2805,8 +2810,8 @@ main(int argc, char *argv[])
     static int scale_subwindow[2*XY] = {
         WINDOW_WIDTH+COLOR_BAR_XOFFSET-LOOSE,
         WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH+LOOSE,
-        COLOR_BAR_YOFFSET-LOOSE,
-        COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT+LOOSE
+        COLOR_BAR_TOP-LOOSE,
+        COLOR_BAR_TOP+COLOR_BAR_HEIGHT+LOOSE
     };
         
     int mouse_position[XY];
@@ -3184,9 +3189,22 @@ main(int argc, char *argv[])
           break;
 
       case ConfigureNotify:
-          printf("ConfigureNotify\n");
-          main_window->vh = event.xconfigure.height;
-          main_window->vw = event.xconfigure.width;
+          if (debug) {
+              printf("ConfigureNotify %d %d %d %d\n",
+                     event.xconfigure.x,
+                     event.xconfigure.y,
+                     event.xconfigure.width,
+                     event.xconfigure.height);
+          }
+          if (event.xconfigure.window == main_window->wind) {
+              if (main_window->vw != event.xconfigure.width ||
+                  main_window->vh != event.xconfigure.height) {
+                  main_window->vw = event.xconfigure.width;
+                  main_window->vh = event.xconfigure.height;
+                  zoom = (float)MIN((main_window->vw-COLOR_BAR_WINDOW)/image_width,main_window->vh/image_height);
+                  must_redraw_main = TRUE;
+              }
+          }
           break;
 
       case ButtonPress:
@@ -3713,7 +3731,7 @@ main(int argc, char *argv[])
                      event.xmotion.y);
           }
           mouse_position[X] = event.xmotion.x;
-          mouse_position[Y] = FLIPY(main_window, event.xmotion.y);
+          mouse_position[Y] = event.xmotion.y;
 
           if (evaluating_pixel) {
               must_evaluate_pixel = TRUE;
@@ -3801,6 +3819,7 @@ main(int argc, char *argv[])
               draw_cursor(main_window, mouse_position, roi_radius * zoom);
           evaluate_position[X] = (mouse_position[X] - draw_origin[X])/zoom;
           evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y])/zoom;
+          evaluate_position[Y] = image_height-evaluate_position[Y]-1;
           evaluate_pixel(evaluate_position,
                          image,
                          frame,

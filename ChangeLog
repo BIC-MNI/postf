@@ -1,3 +1,8 @@
+2005-03-16 Bert Vincent <bert@bic.mni.mcgill.ca>
+	* More autoconf fixes/changes
+	* Even more porting to X - avoid translation of Y coordinates, use
+	fixed window sizes.
+
 2005-03-10 Bert Vincent <bert@bic.mni.mcgill.ca>
 	* Complete rewrite into Xlib
 	* Started bringing in Gabriel's old interpolation code from his
