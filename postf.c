@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.6  2005-03-17 16:58:12  bert
+   @MODIFIED   : Revision 1.7  2005-03-17 17:27:27  bert
+   @MODIFIED   : Get rid of compilation warnings whereever possible.
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.6  2005/03/17 16:58:12  bert
    @MODIFIED   : Fixes for problems reported by Christopher Baily (cjb@pet.auh.dk) - fix color scaling, fix ROI drawing, and avoid compilation errors on early MINC's that don't define ARGV_VERINFO
    @MODIFIED   :
    @MODIFIED   : Revision 1.5  2005/03/16 17:51:48  bert
@@ -109,6 +112,8 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#define MINC_PLAY_NICE 1        /* Don't pollute my namespace!! */
 #include <volume_io.h>
 
 
@@ -118,12 +123,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-#undef X
-#undef Y
-
-#ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.6 2005-03-17 16:58:12 bert Exp $";
-#endif
+static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.7 2005-03-17 17:27:27 bert Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,6 +146,9 @@ static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1
                             ButtonReleaseMask | \
                             PointerMotionMask | \
                             StructureNotifyMask)
+
+#define MIN(a,b) (((a) < (b)) ? (a) : (b))
+#define MAX(a,b) (((a) < (b)) ? (b) : (a))
 
 #define POSTF_X_VISUAL_DEPTH 24
 #define POSTF_X_VISUAL_CLASS TrueColor
@@ -406,7 +409,7 @@ xinit(void)
     return (0);
 }
 
-int
+void
 xexit(void)
 {
     if (_xmap != NULL) {
@@ -570,7 +573,7 @@ typedef struct {
   int TimeDim;
 } MincInfo;
 
-MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
+MincInfo *open_minc_file(char *minc_filename, VIO_BOOL progress, VIO_BOOL debug)
 {
   
   int
@@ -588,7 +591,7 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
   
   nc_type datatype;
   MincInfo *MincFile;
-  BOOLEAN
+  VIO_BOOL
     frames_present = FALSE,
     slices_present = FALSE;
   
@@ -748,14 +751,14 @@ int read_minc_data(MincInfo *MincFile,
                    int      *user_frame_list,
                    int      user_frame_count,
                    int      images_to_get,
-                   BOOLEAN  frames_present,
+                   VIO_BOOL  frames_present,
                    float    *frame_time,
                    float    *frame_length,
                    float    *min,
                    float    *max,
                    unsigned short *dynamic_volume,
-                   BOOLEAN  progress,
-                   BOOLEAN  debug)
+                   VIO_BOOL  progress,
+                   VIO_BOOL  debug)
 {
   int
     frame,
@@ -765,8 +768,8 @@ int read_minc_data(MincInfo *MincFile,
     coord[MAX_VAR_DIMS],
     count[MAX_VAR_DIMS];
   
-  int notice_every;
-  int image_no;
+  int notice_every = 0;
+  int image_no = 0;
   
   double
     dbl_min,
@@ -789,7 +792,6 @@ int read_minc_data(MincInfo *MincFile,
     fprintf(stderr, "Reading minc data ");
     notice_every = images_to_get/MAX(user_slice_count,user_frame_count);
     if (notice_every == 0) notice_every = 1;
-    image_no = 0;
   }
   
   /* 
@@ -810,7 +812,7 @@ int read_minc_data(MincInfo *MincFile,
       dynamic_volume += MincFile->ImageSize;
       
       if (debug){
-        fprintf(stderr, " Slice: %d, Frame: %d\n",
+        fprintf(stderr, " Slice: %ld, Frame: %ld\n",
                        MincFile->Slices > 0 ? coord[MincFile->SliceDim]+1 : 1,
                        MincFile->Frames > 0 ? coord[MincFile->TimeDim]+1 : 1);
       }
@@ -924,7 +926,7 @@ int read_minc_data(MincInfo *MincFile,
   
 }
 
-int close_minc_file(MincInfo *MincFile)
+void close_minc_file(MincInfo *MincFile)
 {
   
   /* 
@@ -941,13 +943,13 @@ int close_minc_file(MincInfo *MincFile)
   
 }
 
-int read_mni_data(MniInfo  *MniFile,
+void read_mni_data(MniInfo  *MniFile,
                   int      *user_slice_list,
                   int      user_slice_count,
                   int      *user_frame_list,
                   int      user_frame_count,
                   int      images_to_get,
-                  BOOLEAN  frames_present,
+                  VIO_BOOL  frames_present,
                   float    *frame_time,
                   float    *frame_length,
                   float    *min,
@@ -957,8 +959,8 @@ int read_mni_data(MniInfo  *MniFile,
                   int      *min_frame,
                   int      *max_frame,
                   unsigned short *dynamic_volume,
-                  BOOLEAN  progress,
-                  BOOLEAN  debug)
+                  VIO_BOOL  progress,
+                  VIO_BOOL  debug)
      
 {
   int 
@@ -966,7 +968,7 @@ int read_mni_data(MniInfo  *MniFile,
     mni_image, user_image,
     pixel_count,
     notice_every;
-  BOOLEAN 
+  VIO_BOOL 
     scale = FALSE;
   float 
     image_min, image_max,
@@ -1249,7 +1251,6 @@ change_color_map(void (*map)(float, float *), float low, float high)
     float rgb[RGB], col, m, b; 
     int index;
     XColor xcolor;
-    int r;
 
     m = 1.0 / (high - low);
     b = low / (low - high);
@@ -1664,7 +1665,6 @@ void draw_axes(struct postf_wind *wnd_ptr,
     static float dx_max,dx_tic,dx_lo,dy_ts,dy_l,dy_te,dx_ls,dx_min;
     float  x_min, x_max, x_tic, x_lo, y_ts, y_l, x_ls;
     XPoint pt[2];
-    int i;
   
     char axis_string[MAX_STRING_LENGTH];
     
@@ -1742,6 +1742,7 @@ void draw_axes(struct postf_wind *wnd_ptr,
             y_l = py_l;
             x_ls = px_ls;
             break;
+        default:
         case DYNAMIC:
             x_min = dx_min;
             x_max = dx_max;
@@ -2027,11 +2028,9 @@ int get_roi_tac(unsigned short *dynamic_volume,
       n = 0;
       for (j = jstart; j <= jstop; j++)
         for (i = istart; i <= istop; i++)
-          if (*mask_p++ = (i-x)*(i-x)+(j-y)*(j-y) <= r2)
+          if ((*mask_p++ = ((i-x)*(i-x)+(j-y)*(j-y) <= r2)) != 0)
             n++;
-
     }
-
   }
 
   for (present_frame = 0; present_frame < frames; present_frame++){
@@ -2240,7 +2239,6 @@ calculate_conversions(float min,float max,float *cfact,float *cterm)
 void 
 draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
 {
-    long point[XY];
     static int o_r = 0;
     static int o_x = -1, o_y = -1;
     XPoint pt[2];
@@ -2446,6 +2444,9 @@ draw_image(struct postf_wind *wnd_ptr,
             new_height *= zoom;
             tptr = clipping_buffer;
         }
+        else {
+            return;             /* Can't do anything useful, so bail. */
+        }
     
     }
     else {
@@ -2586,8 +2587,8 @@ create_window(char *main_title,
                                   AUXILLARY_WINDOW_WIDTH,
                                   AUXILLARY_WINDOW_HEIGHT);
 
-    if (plot_type == PROFILE && !prof_init || 
-        plot_type == DYNAMIC && !dyna_init){
+    if ((plot_type == PROFILE && !prof_init) || 
+        (plot_type == DYNAMIC && !dyna_init)){
         switch (plot_type){
         case PROFILE:
             prof_init = TRUE;
@@ -2631,7 +2632,7 @@ destroy_window(struct postf_wind *wnd_ptr)
     XSync(_xDisplay, 0);
     while (XCheckWindowEvent(_xDisplay, wnd_ptr->wind, POSTF_X_EVENT_MASK, &ev)) {
       fprintf(stderr, "winclose: dropped %d for window 0x%x\n",
-	      ev.type, wnd_ptr->wind);
+	      ev.type, (unsigned int) wnd_ptr->wind);
     }
     free(wnd_ptr);
 }
@@ -2676,10 +2677,8 @@ int
 main(int argc, char *argv[])
 {
     static char *window_title = NULL; /* Main window title */
-    static int mni_data = FALSE;
     static int debug = FALSE;
     static int progress = TRUE;
-    static int float_data = FALSE;
     static int indices[] = {INDEX_MIN,INDEX_MAX};
 #define nindices (sizeof(indices)/sizeof(indices[0]))
     static int frames = 0;
@@ -2703,8 +2702,6 @@ main(int argc, char *argv[])
 #endif /* ARGV_VERINFO defined */
         { "-title", ARGV_STRING, (char *) NULL, (char *) &window_title,
           "Window title" },
-        { "-mni", ARGV_CONSTANT, (char *) TRUE, (char *) &mni_data,
-          "File is an mni file" },
         { "-debug", ARGV_CONSTANT, (char *) TRUE, (char *) &debug,
           "Output minc file information" },
         { "-noprogress", ARGV_CONSTANT, (char *) FALSE, (char *) &progress,
@@ -2744,13 +2741,11 @@ main(int argc, char *argv[])
         { (char *) NULL, ARGV_END, (char *) NULL, (char *) NULL, (char *) NULL },
     };
   
-    MincInfo *MincFile;
-    int minc_data = FALSE;
-    MniInfo *MniFile;
-    char matrix_type;
+    MincInfo *MincFile = NULL;
+    MniInfo *MniFile = NULL;
     static char default_window_title[] = "stdin";
   
-    BOOLEAN quit;
+    VIO_BOOL quit;
   
     FILE *input_fp;
   
@@ -2768,7 +2763,6 @@ main(int argc, char *argv[])
     struct postf_wind *profile_window = NULL;
     struct postf_wind *dynamic_window = NULL;
 
-    int main_origin[XY];
     int profile_origin[XY];
     int profile_size[XY];
     int dynamic_origin[XY];
@@ -2778,11 +2772,9 @@ main(int argc, char *argv[])
     int min_slice = START_SLICE;
     int max_frame = START_FRAME;
     int max_slice = START_SLICE;
-    int offset_to_images;       /* in blocks */
     int frames_present = FALSE;
     int frame_range_specified = FALSE;
     int slice_range_specified = FALSE;
-    int main_frozen = FALSE;
     int profile_frozen = FALSE;
     int dynamic_frozen = FALSE;
     int axes = XAXIS | YAXIS;   /* axes displayed in profile window */
@@ -2877,7 +2869,6 @@ main(int argc, char *argv[])
     
     if ((MincFile = open_minc_file(input_fn, progress, debug)) != NULL){
       
-      minc_data = TRUE;
       image_width = MincFile->ImageWidth;
       image_height = MincFile->ImageHeight;
       image_size = MincFile->ImageSize;
@@ -2896,7 +2887,6 @@ main(int argc, char *argv[])
 
       if (progress && !debug) fprintf(stderr, "\nAttempting to read mni file ...\n");
 
-      mni_data = TRUE;
       image_width = MniFile->ImageWidth;
       image_height = MniFile->ImageHeight;
       image_size = MniFile->ImageSize;
@@ -2989,7 +2979,7 @@ main(int argc, char *argv[])
     exit(ERROR_STATUS);
   }
 
-  if (minc_data) {
+  if (MincFile != NULL) {
     
     read_minc_data(MincFile,
                    user_slice_list,
@@ -3006,7 +2996,7 @@ main(int argc, char *argv[])
                    progress,
                    debug);
     
-  } else if (mni_data){
+  } else if (MniFile != NULL){
 
     read_mni_parameters(MniFile,
                         user_slice_list,
@@ -3729,7 +3719,7 @@ main(int argc, char *argv[])
                   break;
       
               default:
-                  fprintf(stderr, "Unknown keysym %d\n", keysym);
+                  fprintf(stderr, "Unknown keysym %d\n", (int) keysym);
                   break;
               }
           }
