@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.5  2005-03-16 17:51:48  bert
+   @MODIFIED   : Revision 1.6  2005-03-17 16:58:12  bert
+   @MODIFIED   : Fixes for problems reported by Christopher Baily (cjb@pet.auh.dk) - fix color scaling, fix ROI drawing, and avoid compilation errors on early MINC's that don't define ARGV_VERINFO
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.5  2005/03/16 17:51:48  bert
    @MODIFIED   : Latest changes to autoconf stuff and X port
    @MODIFIED   :
    @MODIFIED   : Revision 1.4  2005/03/10 23:54:43  bert
@@ -119,7 +122,7 @@
 #undef Y
 
 #ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.5 2005-03-16 17:51:48 bert Exp $";
+static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.6 2005-03-17 16:58:12 bert Exp $";
 #endif
 
 #include <stdio.h>
@@ -1316,6 +1319,8 @@ float
 get_color(short position, float low, float high)
 {
     float scaled_position, m, b;
+
+    scaled_position = get_scaled_position(position);
   
     m = 1 / (high - low);
     b = -m * low;
@@ -2247,7 +2252,7 @@ draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
         if (o_r != 0) {
             XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                      o_x-o_r,
-                     o_y+o_r,
+                     o_y-o_r,
                      2*o_r,
                      2*o_r,
                      0,
@@ -2279,7 +2284,7 @@ draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
             if (radius != 0) {
                 XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
                          position[X]-radius,
-                         position[Y]+radius,
+                         position[Y]-radius,
                          2*radius,
                          2*radius,
                          0,
@@ -2693,7 +2698,9 @@ main(int argc, char *argv[])
     static void (*present_scale)(float, float *) = 0;
   
     static ArgvInfo argTable[] = {
+#ifdef ARGV_VERINFO             /* For pre-MINC-1.3 compilation */
         { NULL, ARGV_VERINFO, PACKAGE_VERSION, NULL, NULL },
+#endif /* ARGV_VERINFO defined */
         { "-title", ARGV_STRING, (char *) NULL, (char *) &window_title,
           "Window title" },
         { "-mni", ARGV_CONSTANT, (char *) TRUE, (char *) &mni_data,
@@ -2755,7 +2762,7 @@ main(int argc, char *argv[])
     float low = 0.0;        /* threshold for start of scale ramping */
     float high = 1.0;         /* threshold for end of scale ramping */
     float min, max;             /* min and max data values */
-    float moving_color; /* color selected using mouse pointer during rescaling */
+    static float moving_color; /* color selected using mouse pointer during rescaling */
   
     struct postf_wind *main_window = NULL;
     struct postf_wind *profile_window = NULL;
@@ -3181,11 +3188,15 @@ main(int argc, char *argv[])
           break;
 
       case MapNotify:
-          printf("MapNotify\n");
+          if (debug) {
+              printf("MapNotify\n");
+          }
           break;
 
       case ReparentNotify:
-          printf("ReparentNotify\n");
+          if (debug) {
+              printf("ReparentNotify\n");
+          }
           break;
 
       case ConfigureNotify:
