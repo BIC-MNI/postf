@@ -330,7 +330,7 @@ void close_mni_file(MniInfo *MniFile)
   free(MniFile);
 }
 
-zero_fruit_salad(MNIbyte *outbuf, short set_point, int line_size)
+void zero_fruit_salad(MNIbyte *outbuf, short set_point, int line_size)
 {
   int line;
   for (line = 0; line < FRUIT_SALAD_HEIGHT; line++)
