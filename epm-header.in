@@ -1,0 +1,12 @@
+%product postf
+%copyright 1992-2004 Gabriel C. Leger
+%vendor McConnell Brain Imaging Centre
+%packager Robert Vincent <bert@bic.mni.mcgill.ca>
+%license COPYING
+%readme README
+%description Extra minc package
+%version @VERSION@
+%requires netcdf
+%requires minc
+%requires bicpl
+
