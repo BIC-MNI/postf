@@ -9,9 +9,9 @@
 .\" software for any purpose.  It is provided "as is" without
 .\" express or implied warranty.
 .\"
-.\" $Header: /private-cvsroot/visualization/postf/postf.man1,v 1.1 2005-03-04 21:32:38 bert Exp $
+.\" $Header: /private-cvsroot/visualization/postf/postf.man1,v 1.2 2005-03-17 17:59:52 bert Exp $
 .\"
-.TH postf 1 "Mar 03, 2005" "Rev: 1.0.01"
+.TH postf 1 "Mar 03, 2005" "Rev: 1.0.02"
 .SH NAME
 .B postf
 a medical image display utility.
