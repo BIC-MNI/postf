@@ -10,5 +10,6 @@ AC_PATH_XTRA
 LIBS="-lX11 -lXext $LIBS"
 mni_REQUIRE_LIB(Ygl,[#include <X11/Ygl.h>],[winopen("");gconfig();])
 AC_CONFIG_FILES([Makefile])
-AC_OUTPUT
+AC_OUTPUT(epm-header)
+
 
