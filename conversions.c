@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 char *convert_str(unsigned char *in_string, int string_length)
 {
