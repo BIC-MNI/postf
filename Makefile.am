@@ -1,5 +1,5 @@
 AUTOMAKE_OPTIONS = check-news
-ACLOCAL_AMFLAGS = -I m4
+# ACLOCAL_AMFLAGS = -I m4
 
 bin_PROGRAMS = postf
 
