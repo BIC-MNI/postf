@@ -4,10 +4,55 @@ Foundation, Inc.
    This file is free documentation; the Free Software Foundation gives
 unlimited permission to copy, distribute and modify it.
 
-Installation of postf
+INSTALLATION OF POSTF
 =====================
 Postf is a simple display program for medical image files, originally
-developed by Gabriel C. Léger at the MNI's McConnell Brain Imaging Centre.
+developed by Gabriel C. Léger at the Montreal Neurological Institute's
+McConnell Brain Imaging Centre.  It has been ported to the X Window
+System by Bert Vincent <bert@bic.mni.mcgill.ca>.
+
+Postf requires that you have already installed the X Window System,
+MINC, and netCDF on your system.  For most users of Linux and other
+UNIX-like operating systems, the X Window System is probably already
+installed on your computer.  Apple distributes a version of the X Window
+System for Mac OS X, but it is not installed by default.
+
+MINC (Medical Imaging NetCDF) is freely available from the MNI-BIC
+website.  Source distributions are available here:
+
+http://www.bic.mni.mcgill.ca/software/distribution/
+
+Binary distributions are generally available here:
+
+http://packages.bic.mni.mcgill.ca/
+
+And for documentation and occasional news about MINC, look here:
+
+http://www.bic.mni.mcgill.ca/software/minc
+
+The netCDF package is available from the UCAR (University Corporation
+for Atmospheric Research) UNIDATA project website:
+
+http://my.unidata.ucar.edu/content/software/netcdf/index.html
+
+The latest version of netCDF that has been thoroughly testing with MINC
+is 3.5.1.  We know of no reason that MINC will not support 3.6.0 and
+later versions, but this has not been tested as of this writing (March
+2005).
+
+Once you have installed of the required packages, building postf itself
+should be simply a matter of typing the following commands:
+
+./configure
+make 
+make install
+
+Depending on the particulars of your configuration, you may need to use
+the configure script's --prefix and --with-build-path options.
+"--prefix" is used to set the target directory for installations.
+"--with-build-path" allows you to specify a directory that contains
+additional header and library files (in the subdirectories "include" and
+"lib").
 
 The rest of these instructions are generic.
 
