@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.1  2005-02-11 22:06:51  bert
+   @MODIFIED   : Revision 1.2  2005-02-14 15:44:37  bert
+   @MODIFIED   : Update Gabriel's name and copyright information
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.1  2005/02/11 22:06:51  bert
    @MODIFIED   : Initial checkin, postf ported to Linux and autoconfiscated
    @MODIFIED   :
  * Revision 1.9  1995/05/19  15:57:00  gaby
@@ -75,7 +78,17 @@
  *  When lower left hand corner coordinates of image to be 
  *  draw are -ve wrt view port, then they must be set to zero
  *  and the image "cropped" appropriately.
-   ---------------------------------------------------------------------------- */
+ *
+ * @COPYRIGHT  :
+ * Copyright 1993-2005 Gabriel C. Léger, McConnell Brain Imaging Centre,
+ * Montreal Neurological Institute, McGill University.  Permission to use,
+ * copy, modify, and distribute this software and its documentation for any
+ * purpose and without fee is hereby granted, provided that the above
+ * copyright notice appear in all copies.  The author and McGill University
+ * make no representations about the suitability of this software for any
+ * purpose.  It is provided "as is" without express or implied warranty.
+ *
+ * ------------------------------------------------------------------------- */
 
 /*
  * Some definitions for the use of Dave globals routines
@@ -89,7 +102,7 @@
 #undef Y
 
 #ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.1 2005-02-11 22:06:51 bert Exp $";
+static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.2 2005-02-14 15:44:37 bert Exp $";
 #endif
 
 #include <stdio.h>
