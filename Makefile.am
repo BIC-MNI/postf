@@ -1,9 +1,12 @@
 AUTOMAKE_OPTIONS = check-news
+ACLOCAL_AMFLAGS = -I m4
 
 bin_PROGRAMS = postf
 
 postf_SOURCES = postf.c mnifile.c conversions.c
 
+postf_LDADD = $(X_PRE_LIBS) $(X_LIBS) -lX11 -lXext $(X_EXTRA_LIBS)
+AM_CFLAGS = $(X_CFLAGS)
 noinst_HEADERS = glhacks.h global_variables.h image.h mnifile.h conversions.h
 
 dist_man1_MANS = postf.man1

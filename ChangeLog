@@ -1,3 +1,8 @@
+2005-03-10 Bert Vincent <bert@bic.mni.mcgill.ca>
+	* Complete rewrite into Xlib
+	* Started bringing in Gabriel's old interpolation code from his
+	xpostf.
+	
 2005-03-04 Bert Vincent <bert@bic.mni.mcgill.ca>
 	* Added epm-header
 	* Added man page

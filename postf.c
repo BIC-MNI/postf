@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.3  2005-03-10 20:11:24  bert
+   @MODIFIED   : Revision 1.4  2005-03-10 23:54:43  bert
+   @MODIFIED   : Major cleanup and speedup
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.3  2005/03/10 20:11:24  bert
    @MODIFIED   : Massively rewritten to eliminate Ygl, now uses Xlib directly
    @MODIFIED   :
    @MODIFIED   : Revision 1.2  2005/02/14 15:44:37  bert
@@ -108,7 +111,7 @@
 #undef Y
 
 #ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.3 2005-03-10 20:11:24 bert Exp $";
+static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.4 2005-03-10 23:54:43 bert Exp $";
 #endif
 
 #include <stdio.h>
@@ -312,10 +315,16 @@ force_redraw(struct postf_wind *wnd_ptr)
 {
     XEvent e;
 
-    /* Force a redraw */
     e.type = Expose;
     e.xexpose.window = wnd_ptr->wind;
+    e.xexpose.display = _xDisplay;
+    e.xexpose.send_event = False;
+    e.xexpose.x = 0;
+    e.xexpose.y = 0;
+    e.xexpose.width = wnd_ptr->vw;
+    e.xexpose.height = wnd_ptr->vh;
     e.xexpose.count = 0;
+
     XPutBackEvent(_xDisplay, &e);
 }
 
@@ -1599,7 +1608,7 @@ write_scale(struct postf_wind *wnd_ptr,
         cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
         cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
         cbottom = 0,
-        ctop = COLOR_BAR_YOFFSET - TEXT_SEP + 1;
+        ctop = COLOR_BAR_YOFFSET - TEXT_SEP + 3; /* Why? Because it's right! */
     char out_string[MAX_STRING_LENGTH];
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
@@ -1609,7 +1618,7 @@ write_scale(struct postf_wind *wnd_ptr,
                  
     XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
 
-    sprintf(out_string,"max = %3.0f%%",high * 100.0);
+    sprintf(out_string,"max = %3.0f%%", high * 100.0);
     XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
                 SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD), 
                 out_string, strlen(out_string));
@@ -1619,10 +1628,10 @@ write_scale(struct postf_wind *wnd_ptr,
                 SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-TEXT_SEP), 
                 out_string, strlen(out_string));
   
-  sprintf(out_string,"f: %2d  s: %2d",frame+frame_offset,slice+slice_offset);
-  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
-              SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-2*TEXT_SEP), 
-              out_string, strlen(out_string));
+    sprintf(out_string,"f: %2d  s: %2d",frame+frame_offset,slice+slice_offset);
+    XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-2*TEXT_SEP), 
+                out_string, strlen(out_string));
 }
 
 void draw_axes(struct postf_wind *wnd_ptr,
@@ -2034,7 +2043,7 @@ int get_roi_tac(unsigned short *dynamic_volume,
     *roi_tac++ = mv;
     diff = svv - n*mv*mv;
     if (diff < 0) diff = -diff;
-    *roi_std++ = sqrtf(diff / (n-1));
+    *roi_std++ = sqrt(diff / (n-1));
 
   }
 
@@ -2388,7 +2397,8 @@ draw_image(struct postf_wind *wnd_ptr,
     XImage *xi;
     int x, y;
     unsigned short *tptr;
-    int r;
+    unsigned long *lptr;
+    double izoom;               /* inverse of zoom */
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
     XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0, WINDOW_WIDTH,
@@ -2465,17 +2475,19 @@ draw_image(struct postf_wind *wnd_ptr,
                       8,        /* BitmapPad */
                       0);       /* BytesPerLine */
 
-#if DO_RESAMPLE
+#if !DO_RESAMPLE
     xi->data = (char*) malloc(xi->bytes_per_line * new_height);
     if (xi->data == NULL) {
         fprintf(stderr, "yikes: can't allocate memory.\n");
         exit(1);
     }
-    for (x = 0; x < new_width; x++) {
-        for (y = 0; y < new_height; y++) {
-            int iy = new_height - (y + 1);
-            XPutPixel(xi, x, iy, 
-                      xclr(tptr[(long)((1.0/zoom) * x) + image_width * (long)((1.0/zoom) * y)]));
+    lptr = (unsigned long *) xi->data;
+    izoom = 1.0 / zoom;
+
+    for (y = new_height-1; y >= 0; y--) {
+        unsigned short *xptr = &tptr[image_width * (int)(izoom * y)];
+        for (x = 0; x < new_width; x++) {
+            *lptr++ = xclr(xptr[(int)(izoom * x)]);
         }
     }
 #endif /* DO_RESAMPLE */
@@ -2740,9 +2752,9 @@ main(int argc, char *argv[])
     float min, max;             /* min and max data values */
     float moving_color; /* color selected using mouse pointer during rescaling */
   
-    struct postf_wind *main_window;
-    struct postf_wind *profile_window;
-    struct postf_wind *dynamic_window;
+    struct postf_wind *main_window = NULL;
+    struct postf_wind *profile_window = NULL;
+    struct postf_wind *dynamic_window = NULL;
 
     int main_origin[XY];
     int profile_origin[XY];
@@ -3144,6 +3156,9 @@ main(int argc, char *argv[])
 
       switch (event.type) {
       case Expose:
+          if (debug) {
+              printf("Expose\n");
+          }
           if (event.xexpose.count == 0) {
               if (main_window != NULL && 
                   event.xexpose.window == main_window->wind) {
@@ -3692,6 +3707,11 @@ main(int argc, char *argv[])
           break;
 
       case MotionNotify:
+          if (debug) {
+              printf("MotionNotify %d %d\n",
+                     event.xmotion.x,
+                     event.xmotion.y);
+          }
           mouse_position[X] = event.xmotion.x;
           mouse_position[Y] = FLIPY(main_window, event.xmotion.y);
 
@@ -3704,8 +3724,7 @@ main(int argc, char *argv[])
               must_redraw_main = TRUE;
           }
           else if (moving_scale) {
-              translate_scale(mouse_position[Y],
-                              &low, &high, moving_color);
+              translate_scale(mouse_position[Y], &low, &high, moving_color);
               must_change_color_map = TRUE;
               must_write_scale = TRUE;
           }
@@ -3728,24 +3747,6 @@ main(int argc, char *argv[])
           break;
       }
 
-#if 0
-      if (must_write_scale || 
-          must_change_color_map ||
-          must_redraw_main ||
-          must_evaluate_pixel) {
-          force_redraw(main_window);
-      }
-      else if (must_redraw_profile && profile_window != NULL) {
-          force_redraw(profile_window);
-      }
-      else if (must_redraw_dynamic && dynamic_window != NULL) {
-          force_redraw(dynamic_window);
-      }
-
-      if (event.type != Expose) {
-          continue;
-      }
-#endif
       if (must_change_color_map) {
           must_change_color_map = FALSE;
           change_color_map(present_scale, low, high);
