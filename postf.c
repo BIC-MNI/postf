@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.2  2005-02-14 15:44:37  bert
+   @MODIFIED   : Revision 1.3  2005-03-10 20:11:24  bert
+   @MODIFIED   : Massively rewritten to eliminate Ygl, now uses Xlib directly
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.2  2005/02/14 15:44:37  bert
    @MODIFIED   : Update Gabriel's name and copyright information
    @MODIFIED   :
    @MODIFIED   : Revision 1.1  2005/02/11 22:06:51  bert
@@ -94,15 +97,18 @@
  * Some definitions for the use of Dave globals routines
  */
 
-#define  GLOBALS_LOOKUP_NAME  globals_list
-#include <bicpl/globals.h>
 #include <volume_io.h>
+
+
+/* Set to 1 if you want to enable the somewhat experimental resampling code.
+ */
+#define DO_RESAMPLE 0
 
 #undef X
 #undef Y
 
 #ifndef lint
-static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.2 2005-02-14 15:44:37 bert Exp $";
+static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.3 2005-03-10 20:11:24 bert Exp $";
 #endif
 
 #include <stdio.h>
@@ -111,41 +117,58 @@ static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1
 #include <float.h>
 #include <math.h>
 
-/*
- * Patch to avoid problems with definitions
- * in Davids globals include files
- */
+#define FLIPY(wnd_ptr, y) (wnd_ptr->vh - (y) - 1)
 
-#undef   BLACK
-#undef   WHITE
-#undef   RED
-#undef   GREEN
-#undef   BLUE
-#undef   CYAN
-#undef   MAGENTA
-#undef   YELLOW
-
-#define  window   GL_window
-#define  normal   GL_normal
-#define  poly     GL_poly
-
-#include <X11/Ygl.h>
 #include <X11/X.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
+#include <X11/extensions/Xdbe.h>
 
-#undef   window
-#undef   normal
-#undef   poly
+#define DoRGB (DoRed | DoBlue | DoGreen)
+
+#define POSTF_X_EVENT_MASK (ExposureMask | \
+                            KeyPressMask | \
+                            KeyReleaseMask | \
+                            ButtonPressMask | \
+                            ButtonReleaseMask | \
+                            PointerMotionMask | \
+                            StructureNotifyMask)
+
+#define POSTF_X_VISUAL_DEPTH 24
+#define POSTF_X_VISUAL_CLASS TrueColor
+
+struct postf_wind {
+    Display *display;
+    Visual *visual;
+    Window wind;
+    Window draw;
+    Window wbuf[2];
+    GC gc;
+    double ol;
+    double or;
+    double ob;
+    double ot;
+    double xf;
+    double yf;
+    double xo;
+    double yo;
+    int vl;
+    int vb;
+    int vw;
+    int vh;
+};
+
+#if DO_RESAMPLE    
+typedef unsigned char *(*resample_func_t) (unsigned short *, int, int, int, int, int);
+
+resample_func_t resample_function;
+int debug_level = 2;
+#endif /* DO_RESAMPLE */
 
 /*
  * And some standard defs
  */
-
-/*
-#include <gl/device.h>
-#include <fmclient.h>
-*/
-
-#include "glhacks.h"
 
 #include <minc.h>
 
@@ -227,7 +250,7 @@ static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1
 #define INDEX_MIN 64
 #define INDEX_MAX 255
 #define INDEX_RANGE (INDEX_MAX-INDEX_MIN)
-#define RGB_MAX 255
+#define RGB_MAX 65535
 
 /*
  * The two possible icon modes:
@@ -248,11 +271,130 @@ static char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1
  * 
  */
 
-short 
+int
   index_min = INDEX_MIN,
   index_max = INDEX_MAX,
   index_range = INDEX_RANGE;
 
+Display *_xDisplay;
+int _xScreen;
+Visual *_xVisual;
+Colormap _xColormap;
+int _xDepth;
+unsigned long *_xmap = NULL;
+unsigned long TextColor, 
+    ProfileBackgroundColor,
+    ProfileXColor, 
+    ProfileYColor, 
+    ProfileZColor,
+    DynamicColor,
+    ImageBackgroundColor,
+    AxisColor;
+
+void 
+swapbuffers(struct postf_wind *wnd_ptr)
+{
+    XdbeSwapInfo xdbesi;
+    xdbesi.swap_window = wnd_ptr->wind;
+    xdbesi.swap_action = XdbeUndefined;
+    XdbeSwapBuffers(_xDisplay, &xdbesi, 1);
+    XFlush(_xDisplay);
+}
+
+void
+frontbuffer(struct postf_wind *wnd_ptr, int which)
+{
+    wnd_ptr->draw = wnd_ptr->wbuf[1-which];
+}
+
+void
+force_redraw(struct postf_wind *wnd_ptr)
+{
+    XEvent e;
+
+    /* Force a redraw */
+    e.type = Expose;
+    e.xexpose.window = wnd_ptr->wind;
+    e.xexpose.count = 0;
+    XPutBackEvent(_xDisplay, &e);
+}
+
+/* Fairly trivial X initialization to get things started...
+ */
+int
+xinit(void)
+{
+    XVisualInfo visualInfo;
+    XColor xcolor;
+
+    _xDisplay = XOpenDisplay(NULL);
+    _xScreen = XDefaultScreen(_xDisplay);
+    _xVisual = XDefaultVisual(_xDisplay, _xScreen);
+
+    if (!XMatchVisualInfo(_xDisplay, _xScreen,
+                          POSTF_X_VISUAL_DEPTH,
+                          POSTF_X_VISUAL_CLASS,
+                          &visualInfo)) {
+        fprintf(stderr,
+                "Unable to obtain desired depth (%d) and class %d\n",
+                POSTF_X_VISUAL_DEPTH,
+                POSTF_X_VISUAL_CLASS);
+        return (-1);
+    }
+
+    _xDepth = visualInfo.depth;
+    _xVisual = visualInfo.visual;
+    _xColormap = DefaultColormap(_xDisplay, _xScreen);
+
+    xcolor.flags = DoRGB;
+    xcolor.red = 0;
+    xcolor.green = 0;
+    xcolor.blue = 0;
+    XAllocColor(_xDisplay, _xColormap, &xcolor);
+    ImageBackgroundColor = xcolor.pixel;
+    ProfileBackgroundColor = xcolor.pixel;
+
+    xcolor.flags = DoRGB;
+    xcolor.red = 65535;
+    xcolor.green = 65535;
+    xcolor.blue = 65535;
+    XAllocColor(_xDisplay, _xColormap, &xcolor);
+    TextColor = xcolor.pixel;
+    DynamicColor = xcolor.pixel;
+    ProfileXColor = xcolor.pixel;
+
+    xcolor.flags = DoRGB;
+    xcolor.red = 65535;
+    xcolor.green = 0;
+    xcolor.blue = 0;
+    XAllocColor(_xDisplay, _xColormap, &xcolor);
+    AxisColor = xcolor.pixel;
+
+    xcolor.flags = DoRGB;
+    xcolor.red = 0;
+    xcolor.green = 65535;
+    xcolor.blue = 0;
+    XAllocColor(_xDisplay, _xColormap, &xcolor);
+    ProfileYColor = xcolor.pixel;
+
+    xcolor.flags = DoRGB;
+    xcolor.red = 0;
+    xcolor.green = 0;
+    xcolor.blue = 65535;
+    XAllocColor(_xDisplay, _xColormap, &xcolor);
+    ProfileZColor = xcolor.pixel;
+
+    return (0);
+}
+
+int
+xexit(void)
+{
+    if (_xmap != NULL) {
+        free(_xmap);
+    }
+    XCloseDisplay(_xDisplay);
+}
 
 /* ----------------------------- MNI Header -----------------------------------
    @NAME       : describe_postf
@@ -340,20 +482,50 @@ int describe_postf(char *dst, char *key, char *nextArg)
   };
   
   /* Print message */
-  (void) fputs(output_text, stdout);
+  fputs(output_text, stdout);
   
   exit(EXIT_FAILURE);
 }
 
-void find_min_max(float *matrix, int size, float *min, float *max, int step)
+unsigned int
+get_mouse_ptr(struct postf_wind *wnd_ptr, int mouse_position[XY])
 {
-  *min = FLT_MAX;
-  *max = -FLT_MAX;
-  while(size--){
-    if (*matrix < *min) *min = *matrix;
-    if (*matrix > *max) *max = *matrix;
-    matrix += step;
-  }
+    Window root;
+    Window child;
+    int x_root, y_root;
+    unsigned int mask;
+
+    XQueryPointer(_xDisplay, wnd_ptr->wind,
+                  &root, &child, 
+                  &x_root, &y_root,
+                  &mouse_position[X], &mouse_position[Y],
+                  &mask);
+    mouse_position[Y] = FLIPY(wnd_ptr, mouse_position[Y]);
+    return (mask);
+}
+
+void 
+my_ortho2(struct postf_wind *wnd_ptr, 
+          double l, double r, double b, double t)
+{
+    wnd_ptr->ol = l;
+    wnd_ptr->or = r;
+    wnd_ptr->ob = b;
+    wnd_ptr->ot = t;
+    wnd_ptr->xf = (wnd_ptr->vw - 1) / (r - l);
+    wnd_ptr->xo = l - wnd_ptr->vl / wnd_ptr->xf;
+    wnd_ptr->yf = (wnd_ptr->vh - 1) / (t - b);
+    wnd_ptr->yo = b - wnd_ptr->vb / wnd_ptr->yf;
+}
+
+int scalex(struct postf_wind *wnd_ptr, double x)
+{
+    return (int) rint((x - wnd_ptr->xo) * wnd_ptr->xf);
+}
+
+int scaley(struct postf_wind *wnd_ptr, double y)
+{
+    return ((int) rint((wnd_ptr->yo - y) * wnd_ptr->yf) + wnd_ptr->vh - 1);
 }
 
 /*
@@ -434,24 +606,24 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
    * Get info about variable 
    */
   
-  (void) ncvarinq(MincFile->CdfId, 
-                  MincFile->ImgId, 
-                  image_name, 
-                  &datatype, 
-                  &MincFile->nDim, 
-                  dim_ids, 
-                  &natts);
+  ncvarinq(MincFile->CdfId, 
+           MincFile->ImgId, 
+           image_name, 
+           &datatype, 
+           &MincFile->nDim, 
+           dim_ids, 
+           &natts);
   
   
   if (debug){
-    (void) fprintf(stderr, " Image variable name: %s, attributes: %d, dimensions: %d\n", 
+    fprintf(stderr, " Image variable name: %s, attributes: %d, dimensions: %d\n", 
                    image_name, natts, MincFile->nDim);
-    (void) fprintf(stderr, " Attributes:\n");
+    fprintf(stderr, " Attributes:\n");
     for (attribute = 0; attribute < natts; attribute++){
-      (void) ncattname(MincFile->CdfId, MincFile->ImgId, attribute, attname);
-      (void) fprintf(stderr, "  %s\n", attname);
+      ncattname(MincFile->CdfId, MincFile->ImgId, attribute, attname);
+      fprintf(stderr, "  %s\n", attname);
     }
-    (void) fprintf(stderr, " Dimension variables:\n");
+    fprintf(stderr, " Dimension variables:\n");
   }
   
   /*
@@ -460,13 +632,13 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
   
   for (dimension = 0; dimension < MincFile->nDim; dimension++){
     
-    (void) ncdiminq(MincFile->CdfId,
-                    dim_ids[dimension],
-                    dim_names[dimension],
-                    &dim_length[dimension]);
+    ncdiminq(MincFile->CdfId,
+             dim_ids[dimension],
+             dim_names[dimension],
+             &dim_length[dimension]);
     
     if (debug){
-      (void) fprintf(stderr, "  %d\t%d\t%s\t%ld\n", 
+        fprintf(stderr, "  %d\t%d\t%s\t%ld\n", 
                      dimension,
                      dim_ids[dimension],
                      dim_names[dimension],
@@ -482,21 +654,25 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
         return(NULL);
       }
       
-    }else if (dimension == MincFile->nDim-3 || dimension == MincFile->nDim-4){
+    }
+    else if (dimension == MincFile->nDim-3 || dimension == MincFile->nDim-4){
       MincFile->SliceDim = dimension;
       MincFile->Slices = dim_length[dimension];
       slices_present = TRUE;
       
-    }else if (dimension == MincFile->nDim-2){
+    }
+    else if (dimension == MincFile->nDim-2){
       MincFile->HeightImageDim = dimension;
       MincFile->ImageHeight = dim_length[dimension];
       
-    }else if (dimension == MincFile->nDim-1){
+    }
+    else if (dimension == MincFile->nDim-1){
       MincFile->WidthImageDim = dimension;
       MincFile->ImageWidth = dim_length[dimension];
       
-    }else{
-      (void) fprintf(stderr, "  Too many dimensions, skipping dimension <%s>\n",
+    }
+    else{
+      fprintf(stderr, "  Too many dimensions, skipping dimension <%s>\n",
                      dim_names[dimension]);
       
     }
@@ -510,22 +686,22 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
    */
   
   MincFile->Icv = miicv_create();
-  (void) miicv_setint(MincFile->Icv, MI_ICV_DO_NORM, TRUE);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_TYPE, NC_SHORT);
-  (void) miicv_setstr(MincFile->Icv, MI_ICV_SIGN, MI_UNSIGNED);
-  (void) miicv_setdbl(MincFile->Icv, MI_ICV_VALID_MAX, index_max);
-  (void) miicv_setdbl(MincFile->Icv, MI_ICV_VALID_MIN, index_min);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_DO_FILLVALUE, TRUE);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_DO_DIM_CONV, TRUE);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_XDIM_DIR, MI_ICV_POSITIVE);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_YDIM_DIR, MI_ICV_POSITIVE);
-  (void) miicv_setint(MincFile->Icv, MI_ICV_ZDIM_DIR, MI_ICV_POSITIVE);
+  miicv_setint(MincFile->Icv, MI_ICV_DO_NORM, TRUE);
+  miicv_setint(MincFile->Icv, MI_ICV_TYPE, NC_SHORT);
+  miicv_setstr(MincFile->Icv, MI_ICV_SIGN, MI_UNSIGNED);
+  miicv_setdbl(MincFile->Icv, MI_ICV_VALID_MAX, index_max);
+  miicv_setdbl(MincFile->Icv, MI_ICV_VALID_MIN, index_min);
+  miicv_setint(MincFile->Icv, MI_ICV_DO_FILLVALUE, TRUE);
+  miicv_setint(MincFile->Icv, MI_ICV_DO_DIM_CONV, TRUE);
+  miicv_setint(MincFile->Icv, MI_ICV_XDIM_DIR, MI_ICV_POSITIVE);
+  miicv_setint(MincFile->Icv, MI_ICV_YDIM_DIR, MI_ICV_POSITIVE);
+  miicv_setint(MincFile->Icv, MI_ICV_ZDIM_DIR, MI_ICV_POSITIVE);
   
   /* 
    * Attach icv to image variable 
    */
   
-  (void) miicv_attach(MincFile->Icv, MincFile->CdfId, MincFile->ImgId);
+  miicv_attach(MincFile->Icv, MincFile->CdfId, MincFile->ImgId);
   
   /*
    * If frames are present, then get variable id for time
@@ -534,7 +710,8 @@ MincInfo *open_minc_file(char *minc_filename, BOOLEAN progress, BOOLEAN debug)
   if (frames_present) {
     MincFile->TimeId = ncvarid(MincFile->CdfId, dim_names[MincFile->TimeDim]);  
     MincFile->TimeWidthId = ncvarid(MincFile->CdfId, MItime_width);  
-  }else{
+  }
+  else{
     MincFile->Frames = 0;
   }
   
@@ -582,15 +759,15 @@ int read_minc_data(MincInfo *MincFile,
    * Modify count and coord 
    */
   
-  (void) miset_coords(MincFile->nDim, (long) 0, coord);
-  (void) miset_coords(MincFile->nDim, (long) 1, count);
+  miset_coords(MincFile->nDim, (long) 0, coord);
+  miset_coords(MincFile->nDim, (long) 1, count);
   count[MincFile->nDim-1] = MincFile->ImageWidth;
   count[MincFile->nDim-2] = MincFile->ImageHeight;
   coord[MincFile->nDim-1] = 0;
   coord[MincFile->nDim-2] = 0;
   
   if (progress){
-    (void) fprintf(stderr, "Reading minc data ");
+    fprintf(stderr, "Reading minc data ");
     notice_every = images_to_get/MAX(user_slice_count,user_frame_count);
     if (notice_every == 0) notice_every = 1;
     image_no = 0;
@@ -610,19 +787,19 @@ int read_minc_data(MincInfo *MincFile,
       if (MincFile->Frames > 0)
         coord[MincFile->TimeDim] = user_frame_list[frame]-1;
       
-      (void) miicv_get(MincFile->Icv, coord, count, (void *) dynamic_volume);
+      miicv_get(MincFile->Icv, coord, count, (void *) dynamic_volume);
       dynamic_volume += MincFile->ImageSize;
       
       if (debug){
-        (void) fprintf(stderr, " Slice: %d, Frame: %d\n",
+        fprintf(stderr, " Slice: %d, Frame: %d\n",
                        MincFile->Slices > 0 ? coord[MincFile->SliceDim]+1 : 1,
                        MincFile->Frames > 0 ? coord[MincFile->TimeDim]+1 : 1);
       }
       
       if (progress){
         if (image_no++ % notice_every == 0){
-          (void) fprintf(stderr, ".");
-          (void) fflush(stderr);            
+          fprintf(stderr, ".");
+          fflush(stderr);            
         }
         
       }
@@ -631,10 +808,10 @@ int read_minc_data(MincInfo *MincFile,
     
   } /* for slice */
   
-  if (progress) (void) fprintf(stderr, " done\n");
+  if (progress) fprintf(stderr, " done\n");
   
-  (void) miicv_inqdbl(MincFile->Icv, MI_ICV_NORM_MIN, &dbl_min);
-  (void) miicv_inqdbl(MincFile->Icv, MI_ICV_NORM_MAX, &dbl_max);
+  miicv_inqdbl(MincFile->Icv, MI_ICV_NORM_MIN, &dbl_min);
+  miicv_inqdbl(MincFile->Icv, MI_ICV_NORM_MAX, &dbl_max);
   
   *min = (float) dbl_min;
   *max = (float) dbl_max;
@@ -644,29 +821,48 @@ int read_minc_data(MincInfo *MincFile,
    */
   
   if (frames_present){
+      char str_tmp[128];
+
+      /* 
+       * Get time domain 
+       */
     
-    /* 
-     * Get time domain 
-     */
+      count[0] = MincFile->Frames;
+      coord[0] = 0;
+
+      miattgetstr(MincFile->CdfId, MincFile->TimeId, MIspacing,
+                  sizeof(str_tmp), str_tmp);
+      if (!strcmp(str_tmp, MI_IRREGULAR)) {
+          mivarget(MincFile->CdfId,
+                   MincFile->TimeId,
+                   coord,
+                   count,
+                   NC_FLOAT,
+                   MI_SIGNED,
+                   frame_time);
     
-    count[0] = MincFile->Frames;
-    coord[0] = 0;
-    
-    (void) mivarget(MincFile->CdfId,
-                    MincFile->TimeId,
-                    coord,
-                    count,
-                    NC_FLOAT,
-                    MI_SIGNED,
-                    frame_time);
-    
-    (void) mivarget(MincFile->CdfId,
-                    MincFile->TimeWidthId,
-                    coord,
-                    count,
-                    NC_FLOAT,
-                    MI_SIGNED,
-                    frame_length);
+          mivarget(MincFile->CdfId,
+                   MincFile->TimeWidthId,
+                   coord,
+                   count,
+                   NC_FLOAT,
+                   MI_SIGNED,
+                   frame_length);
+      }
+      else {
+          double start;
+          double step;
+
+          miattget1(MincFile->CdfId, MincFile->TimeId, MIstart,
+                    NC_DOUBLE, &start);
+          miattget1(MincFile->CdfId, MincFile->TimeId, MIstep,
+                    NC_DOUBLE, &step);
+
+          for (frame = 0;  frame < MincFile->Frames; frame++) {
+              frame_time[frame] = frame*step;
+              frame_length[frame] = step;
+          }
+      }
     
     /*
      * Calculate midframe time and frame_length.
@@ -674,8 +870,13 @@ int read_minc_data(MincInfo *MincFile,
     
     for (frame = 0; frame < MincFile->Frames; frame++){
       frame_time[frame] = (frame_time[frame] + frame_length[frame]/2) / 60;
+
+      if (frame < MincFile->Frames-1 && 
+          frame_time[frame] > frame_time[frame + 1]) {
+          fprintf(stderr, "WARNING: frame times are not monotonically increasing!\n");
+      }
       if (debug) {
-        (void) fprintf(stderr, " Frame: %d, Time: %.2f, length: %.2f\n",
+        fprintf(stderr, " Frame: %d, Time: %.2f, length: %.2f\n",
                        frame+1,
                        frame_time[frame],
                        frame_length[frame]);
@@ -690,7 +891,7 @@ int read_minc_data(MincInfo *MincFile,
     for (frame = 0; frame < user_frame_count; frame++){
       frame_time[frame] = frame_time[user_frame_list[frame]-1];
       if (debug) {
-        (void) fprintf(stderr, " User frame: %d, Study frame: %d, time: %.2f\n",
+        fprintf(stderr, " User frame: %d, Study frame: %d, time: %.2f\n",
                        frame+1,
                        user_frame_list[frame],
                        frame_time[frame]);
@@ -711,13 +912,13 @@ int close_minc_file(MincInfo *MincFile)
    * Free the image icv 
    */
   
-  (void) miicv_free(MincFile->Icv);
+  miicv_free(MincFile->Icv);
   
   /* 
    * Close the file and return
    */
   
-  (void) miclose(MincFile->CdfId);
+  miclose(MincFile->CdfId);
   
 }
 
@@ -800,8 +1001,8 @@ int read_mni_data(MniInfo  *MniFile,
       present_byte += MniFile->ImageSize;      
       
       if (progress && mni_image % notice_every == 0){
-        (void) fprintf(stderr, ".");
-        (void) fflush(stderr);
+        fprintf(stderr, ".");
+        fflush(stderr);
       }
       
     }
@@ -838,8 +1039,8 @@ int read_mni_data(MniInfo  *MniFile,
           (present_factor * (short)(*present_byte--) - present_term);
 
       if (progress && user_image % notice_every == 0){
-        (void) fprintf(stderr, ".");
-        (void) fflush(stderr);
+        fprintf(stderr, ".");
+        fflush(stderr);
       }
     }
   }
@@ -883,11 +1084,11 @@ void read_float_data(FILE *input_fp,
   total_pixels = image_size * no_of_images;
   
   if ((float_data = (float *)malloc((sizeof(float) * total_pixels))) == NULL){
-    (void) fprintf(stderr,"NOT ENOUGH MEMORY AVAILABLE\n");
+    fprintf(stderr,"NOT ENOUGH MEMORY AVAILABLE\n");
     exit(ERROR_STATUS);
   }
   if (total_pixels != fread(float_data, sizeof(float), total_pixels, input_fp)){
-    (void) fprintf(stderr,"\007%d image(s) of size %d x %d not found\n",
+    fprintf(stderr,"\007%d image(s) of size %d x %d not found\n",
                    no_of_images,image_width,image_height);
     exit(ERROR_STATUS);
   }
@@ -929,23 +1130,6 @@ void read_float_data(FILE *input_fp,
   free(float_data);
 }
 
-void initialize_gl_fonts()
-{
-#if 0
-  fmfonthandle font_handle, font_handle_scaled;
-  
-  fminit();
-  if ((font_handle = fmfindfont("Helvetica")) == 0){
-    (void) fprintf(stderr,"Fonts not found ...");
-    return;
-  }
-  if (font_handle != (fmfonthandle) 0){
-    font_handle_scaled = fmscalefont(font_handle,8.0);
-    fmsetfont(font_handle_scaled);
-  }
-#endif
-}
-
 void spectral(float index, float *rgb)
 {
   
@@ -973,19 +1157,21 @@ void spectral(float index, float *rgb)
     {0.8000,0.8000,0.8000}
   };
   
-  float base, slope; short floor;
+  float base, slope; int floor;
   
   if (index >= 1.0){
     *rgb++ = ramp[20][R];
     *rgb++ = ramp[20][G];
     *rgb = ramp[20][B];
-  }else if (index <= 0){
+  }
+  else if (index <= 0){
     *rgb++ = ramp[0][R];
     *rgb++ = ramp[0][G];
     *rgb = ramp[0][B];
-  }else{
+  }
+  else{
     base = index * 20;
-    floor = (short)ftrunc(base);
+    floor = (int)floorf(base);
     slope = base - floor;
     *rgb++ = ramp[floor][R] + (ramp[floor+1][R] - ramp[floor][R]) * slope;
     *rgb++ = ramp[floor][G] + (ramp[floor+1][G] - ramp[floor][G]) * slope;
@@ -1000,11 +1186,13 @@ void hotmetal(float index, float *rgb)
     *rgb++ = 1.0;
     *rgb++ = 1.0;
     *rgb = 1.0;
-  }else if (index <= 0){
+  }
+  else if (index <= 0){
     *rgb++ = 0.0;
     *rgb++ = 0.0;
     *rgb = 0.0;
-  }else{
+  }
+  else{
     float r,g,b;
     r = 2.0 * index;
     if ((g = 2.0 * index - 0.5) < 0) g = 0.0;
@@ -1021,121 +1209,338 @@ void gray(float index, float *rgb)
     *rgb++ = 1.0;
     *rgb++ = 1.0;
     *rgb = 1.0;
-  }else if (index <= 0){
+  }
+  else if (index <= 0){
     *rgb++ = 0.0;
     *rgb++ = 0.0;
     *rgb = 0.0;
-  }else{
+  }
+  else{
     *rgb++ = index;
     *rgb++ = index;
     *rgb = index;
   }
 }
 
-void change_color_map(void (*map)(float, float *), float low, float high)
-{
-  float rgb[RGB], col, m, b; Colorindex index;
-  
-  m = 1.0 / (high - low);
-  b = low / (low - high);
-  
-  for (index = index_min; index <= index_max; index++){
-    col = m*(index-index_min)/index_range+b;
-    map(col, rgb);
-    mapcolor((Colorindex)index,
-             (short)RGB_MAX*rgb[R],
-             (short)RGB_MAX*rgb[G],
-             (short)RGB_MAX*rgb[B]
-             );
-  }
-}
+#define xclr(x) ((_xmap == NULL) ? 0 : _xmap[x-index_min])
 
-void make_color_bar(unsigned short *color_bar)
+void 
+change_color_map(void (*map)(float, float *), float low, float high)
 {
-  int x,y; unsigned short color; float slope;
-  
-  slope = (float)index_range/COLOR_BAR_HEIGHT;
-  for (y = 0; y <= COLOR_BAR_HEIGHT; y++){
-    color = slope * y + index_min + 0.5;
-    for (x = 0; x < COLOR_BAR_WIDTH; x++)
-      *color_bar++ = color;
-  }
-}
+    float rgb[RGB], col, m, b; 
+    int index;
+    XColor xcolor;
+    int r;
 
-int in_subwindow(short *position, short *window)
-{
-  return(position[X] > window[0] && 
-         position[X] < window[1] && 
-         position[Y] > window[2] && 
-         position[Y] < window[3]
-         );
-}
+    m = 1.0 / (high - low);
+    b = low / (low - high);
 
-float get_color(short position, float low, float high)
-{
-  static float
-    bottom = COLOR_BAR_YOFFSET,
-    top = COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT,
-    range = COLOR_BAR_HEIGHT;
-  float scaled_position, m, b;
-  
-  m = 1 / (high - low);
-  b = -m * low;
-  
-  if (position < bottom) position = bottom;
-  if (position > top) position = top;
-  
-  scaled_position = (position - bottom) / range;
-  return(m * scaled_position + b);
-}
-
-void new_scale_slope(short position, float *low, float *high, int anchor, float moving_color)
-{
-  float scaled_position, m, b;
-
-  scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
-  switch (anchor){
-  case BOTTOM:
-    b = (scaled_position - *low);
-    if (b != 0.0) {
-      m = moving_color / b;
-      b = -*low * m;
-      *high = (1.0 - b) / m;
+    if (_xmap != NULL) {
+        XFreeColors(_xDisplay, _xColormap, _xmap, index_max - index_min, 0);
+        free(_xmap);
     }
-    break;
-  case TOP:     
-    b = (scaled_position - *high);
-    if (b != 0.0) {
-      m = (moving_color - 1.0) / b;
-      b = 1.0 - *high * m;
-      *low = -b / m;
+    _xmap = malloc(sizeof(unsigned long) * (index_max - index_min + 1));
+    if (_xmap == NULL) {
+        exit(-1);
     }
-    break;
-  }
+              
+    for (index = index_min; index <= index_max; index++) {
+        col = m*(index-index_min)/index_range+b;
+        map(col, rgb);
 
-  if (*high <= *low) {
-      *high = *low + 0.01;
-  }
+        xcolor.flags = DoRGB;
+        xcolor.red = RGB_MAX*rgb[R];
+        xcolor.green = RGB_MAX*rgb[G];
+        xcolor.blue = RGB_MAX*rgb[B];
+        if (XAllocColor(_xDisplay, _xColormap, &xcolor)) {
+            _xmap[index-index_min] = xcolor.pixel;
+        }
+    }
 }
 
-void translate_scale(short position, float *low, float *high, float moving_color)
+void
+make_color_bar(unsigned short *color_bar)
 {
-  float scaled_position, m, b;
+    int x,y; 
+    unsigned short color;
+    float slope;
   
-  scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
-  m = 1 / (*high - *low);
-  b = moving_color - m * scaled_position;
-  *low = -b / m;
-  *high = (1.0 - b) / m;   
-
-  if (*high <= *low) {
-      *high = *low + 0.01;
-  }
+    slope = (float)index_range/COLOR_BAR_HEIGHT;
+    for (y = 0; y <= COLOR_BAR_HEIGHT; y++) {
+        color = slope * y + index_min + 0.5;
+        for (x = 0; x < COLOR_BAR_WIDTH; x++)
+            *color_bar++ = color;
+    }
 }
 
-void write_eval_pixel(short x, short y, float v, int a, int redraw_only)
+int
+in_subwindow(int *position, int *window)
 {
-  static Screencoord
+    return (position[X] > window[0] && 
+            position[X] < window[1] && 
+            position[Y] > window[2] && 
+            position[Y] < window[3]
+            );
+}
+
+float 
+get_color(short position, float low, float high)
+{
+    static float
+        bottom = COLOR_BAR_YOFFSET,
+        top = COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT,
+        range = COLOR_BAR_HEIGHT;
+    float scaled_position, m, b;
+  
+    m = 1 / (high - low);
+    b = -m * low;
+  
+    if (position < bottom) position = bottom;
+    if (position > top) position = top;
+  
+    scaled_position = (position - bottom) / range;
+    return (m * scaled_position + b);
+}
+
+void 
+new_scale_slope(short position, float *low, float *high, int anchor, 
+                float moving_color)
+{
+    float scaled_position, m, b;
+
+    scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
+    switch (anchor){
+    case BOTTOM:
+        b = (scaled_position - *low);
+        if (b != 0.0) {
+            m = moving_color / b;
+            b = -*low * m;
+            *high = (1.0 - b) / m;
+        }
+        break;
+    case TOP:     
+        b = (scaled_position - *high);
+        if (b != 0.0) {
+            m = (moving_color - 1.0) / b;
+            b = 1.0 - *high * m;
+            *low = -b / m;
+        }
+        break;
+    }
+    
+    if (*high <= *low) {
+        *high = *low + 0.01;
+    }
+}
+
+void 
+translate_scale(short position, float *low, float *high, float moving_color)
+{
+    float scaled_position, m, b;
+  
+    scaled_position = (float)(position - COLOR_BAR_YOFFSET) / COLOR_BAR_HEIGHT;
+    m = 1 / (*high - *low);
+    b = moving_color - m * scaled_position;
+    *low = -b / m;
+    *high = (1.0 - b) / m;   
+
+    if (*high <= *low) {
+        *high = *low + 0.01;
+    }
+}
+
+#if DO_RESAMPLE
+unsigned char *
+nearestNeighbour(unsigned short *refImage,
+                 int rw, int rh,
+                 int nw, int nh,
+                 int newDims)
+                        
+{
+    static unsigned char *newImage;
+    static unsigned int *nx, *ny;
+    static int set = False;
+    static double xFactor, yFactor;
+
+    unsigned int x, y, yOffset;
+    int *iptr;
+  
+    if (newDims) {
+
+        if (set) {
+            /* free(newImage); */
+            free(nx);
+            free(ny);
+            set = False;
+        }
+
+        xFactor = (double) (rw - 1) / (nw - 1);
+        yFactor = (double) (rh - 1) / (nh - 1);
+
+    }
+
+    if (debug_level > 0) {
+        printf ("In nearestNeighbour:\n");
+        printf (" xFactor: %.3f, yFactor: %.3f\n", xFactor, yFactor);
+        printf ("      rw: %5d,      rh: %5d\n", rw, rh);
+        printf ("      nw: %5d,      nh: %5d\n", nw, nh);
+    }
+
+    if (!set) {
+        newImage = (unsigned char *) malloc (sizeof (unsigned char) * 4 * nw * nh);
+        nx = (unsigned int *) malloc (sizeof (unsigned int) * nw);
+        ny = (unsigned int *) malloc (sizeof (unsigned int) * nh);
+        set = True;
+  }
+    
+  for (x = 0; x < nw; x++) {
+    nx[x] = ROUND ( x * xFactor );
+    if (debug_level > 2) (void) printf ("x: %03d, nx: %03d\n", x, nx[x]);
+  }
+
+  for (y = 0; y < nh; y++) {
+    ny[y] = ROUND ( y * yFactor );
+    if (debug_level > 2) (void) printf ("y: %03d, ny: %03d\n", y, ny[y]);
+  }
+
+  iptr = (int *) newImage;
+
+  for (y = 0; y < nh; y++) {
+      int iy = nh - (y + 1);
+    yOffset = ny[iy] * rw;
+    for (x = 0; x < nw; x++) {
+        *iptr++ = xclr(*(refImage + yOffset + nx[x])); 
+    }
+  }
+
+  return (newImage);
+  
+} /* end of nearestNeighbour */
+
+
+/* ----------------------------------------------------------------------------
+@NAME       : interpolateImage
+@INPUT      : 
+@OUTPUT     : 
+@RETURNS    : 
+@DESCRIPTION: 
+@GLOBALS    : 
+@CALLS      : 
+@CREATED    : March, 1996 (GC Leger)
+@MODIFIED   : 
+---------------------------------------------------------------------------- */
+
+unsigned char *
+interpolateImage (unsigned short *refImage,
+                  int rw, int rh,
+                  int nw, int nh,
+                  int newDims)
+     
+{
+
+  static unsigned char *newImage;
+  static unsigned int *bx, *by;
+  static double *nx, *ny, x1, x2;
+  static double *wx, *wy;
+  static double xFactor, yFactor;
+  static int set = False;
+
+  unsigned int x, y, yOffset;
+  int *iptr;
+  unsigned short *xref1, *xref2;
+  
+  if (newDims) {
+
+    if (set) {
+        /* free (newImage); */
+      free (nx);  free (ny);
+      free (bx);  free (by);
+      free (wx);  free (wy);
+      set = False;
+    }
+
+    xFactor = (double) (rw - 1) / (nw - 1);
+    yFactor = (double) (rh - 1) / (nh - 1);
+
+  }
+
+  if (!set) {
+    newImage = (unsigned char *) malloc (4 * nw * nh);
+    nx = (double *) malloc (sizeof (double) * nw);
+    bx = (unsigned int *) malloc (sizeof (unsigned int) * nw);
+    wx = (double *) malloc (sizeof (double) * nw);
+    ny = (double *) malloc (sizeof (double) * nh);
+    by = (unsigned int *) malloc (sizeof (unsigned int) * nh);
+    wy = (double *) malloc (sizeof (double) * nh);
+    set = True;
+  }
+    
+  if (newDims) {
+
+    for (x = 0; x < nw; x++) {
+      bx[x] = floor ( nx[x] = x * xFactor );
+      wx[x] = nx[x] - bx[x];
+    }
+
+    for (y = 0; y < nh; y++) {
+      by[y] = floor ( ny[y] = y * yFactor );
+      wy[y] = ny[y] - by[y];
+    }
+
+  }
+
+  if (debug_level > 0) {
+    (void) printf ("In interpolateImage:\n");
+    (void) printf ("xFactor: %.4f, yFactor: %.4f\n", xFactor, yFactor);
+    (void) printf ("rw: %d nw: %d, nx[nw-1]: %.4f\n", rw, nw, nx[nw-1]);
+    (void) printf ("rh: %d nh: %d, ny[nh-1]: %.4f\n", rh, nh, ny[nh-1]);
+  }
+
+  iptr = (int *) newImage;
+
+  for (y = 0; y < nh; y++) {
+      int iy = nh - (y + 1);
+    yOffset = by[iy] * rw;
+
+    for (x = 0; x < nw; x++) {
+
+      xref1 = refImage + yOffset + bx[x];
+      xref2 = xref1 + rw;
+
+      switch ((bx[x] + 1 == rw) + (by[iy] + 1 == rh)<<1) {
+
+      case 0:
+        x1 = *xref1 + wx[x] * (*(xref1 + 1) - *xref1);
+        x2 = *xref2 + wx[x] * (*(xref2 + 1) - *xref2);
+        *iptr++ = xclr(ROUND(x1 + wy[iy] * (x2 - x1)));
+        break;
+
+      case 1:
+        *iptr++ = xclr(ROUND(*xref1 + wy[iy] * (*xref2 - *xref1)));
+        break;
+
+      case 2:
+        *iptr++ = xclr(ROUND(*xref1 + wx[x] * (*(xref1 + 1) - *xref1)));
+        break;
+
+      case 3:
+        *iptr++ = xclr(*xref1);
+        break;
+      }
+    }
+  }
+
+  return (newImage);
+  
+} /* end of interpolateImage */
+
+#endif /* DO_RESAMPLE */
+
+void 
+write_eval_pixel(struct postf_wind *wnd_ptr,
+                 short x, short y, float v, int a, int redraw_only)
+{
+  static int
     cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
     cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
     cbottom = WINDOW_HEIGHT-COLOR_BAR_YOFFSET,
@@ -1144,68 +1549,84 @@ void write_eval_pixel(short x, short y, float v, int a, int redraw_only)
   static short lx,ly;
   static int la;
   static float lv;
-  
+
   if (!redraw_only){
     lx = x;
     ly = y;
     la = a;
     lv = v;
   }
-  
-  pushviewport();
-  viewport(cleft,cright,cbottom,ctop);
-  color(ImageBackgroundColor); clear();
-  popviewport();
-  
-  color(TextColor);
-  
-  cmov2i(EVAL_XCOORD,EVAL_YCOORD);
-  (void) sprintf(out_string,"x=%d",lx);
-  fmprstr(out_string);
-  
-  cmov2i(EVAL_XCOORD,EVAL_YCOORD-TEXT_SEP);
-  (void) sprintf(out_string,"y=%d",ly);
-  fmprstr(out_string);
-  
-  cmov2i(EVAL_XCOORD,EVAL_YCOORD-2*TEXT_SEP);
-  (void) sprintf(out_string,"v=%g",lv);
-  fmprstr(out_string);
 
-  cmov2i(EVAL_XCOORD,EVAL_YCOORD-3*TEXT_SEP);
-  (void) sprintf(out_string,"a=%d",la);
-  fmprstr(out_string);
+  XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
+  XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+                 cleft, FLIPY(wnd_ptr, ctop), 
+                 cright-cleft,ctop-cbottom);
+  
+  XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
+
+  sprintf(out_string,"x=%d",lx);
+  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+              EVAL_XCOORD, 
+              FLIPY(wnd_ptr, EVAL_YCOORD),
+              out_string, strlen(out_string));
+  
+  sprintf(out_string,"y=%d",ly);
+  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+              EVAL_XCOORD, 
+              FLIPY(wnd_ptr, EVAL_YCOORD-TEXT_SEP),
+              out_string, strlen(out_string));
+  
+  
+  sprintf(out_string,"v=%g",lv);
+  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+              EVAL_XCOORD, 
+              FLIPY(wnd_ptr, EVAL_YCOORD-2*TEXT_SEP),
+              out_string, strlen(out_string));
+  
+  sprintf(out_string,"a=%d",la);
+  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+              EVAL_XCOORD, 
+              FLIPY(wnd_ptr, EVAL_YCOORD-3*TEXT_SEP),
+              out_string, strlen(out_string));
 }
 
-void write_scale(float low, float high, int frame, int slice, int frame_offset, int slice_offset)
+void 
+write_scale(struct postf_wind *wnd_ptr,
+            float low, float high, 
+            int frame, int slice, int frame_offset, int slice_offset)
 {
-  static Screencoord
-    cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
-    cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
-    cbottom = 0,
-    ctop = COLOR_BAR_YOFFSET - TEXT_SEP + 1;
-  char out_string[MAX_STRING_LENGTH];
+    static int
+        cleft = WINDOW_WIDTH+COLOR_BAR_XOFFSET/2,
+        cright = WINDOW_WIDTH+COLOR_BAR_WINDOW,
+        cbottom = 0,
+        ctop = COLOR_BAR_YOFFSET - TEXT_SEP + 1;
+    char out_string[MAX_STRING_LENGTH];
+
+    XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, cleft, 
+                   FLIPY(wnd_ptr, ctop),
+                   cright-cleft, ctop-cbottom);
+                 
+    XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
+
+    sprintf(out_string,"max = %3.0f%%",high * 100.0);
+    XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD), 
+                out_string, strlen(out_string));
   
-  pushviewport();
-  viewport(cleft,cright,cbottom,ctop);
-  color(ImageBackgroundColor); clear();
-  popviewport();
+    sprintf(out_string,"min = %3.0f%%",low * 100.0);
+    XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-TEXT_SEP), 
+                out_string, strlen(out_string));
   
-  color(TextColor);
-  
-  cmov2i(SCALE_XCOORD,SCALE_YCOORD);
-  (void) sprintf(out_string,"max = %3.0f%%",high * 100.0);
-  fmprstr(out_string);
-  
-  cmov2i(SCALE_XCOORD,SCALE_YCOORD-TEXT_SEP);
-  (void) sprintf(out_string,"min = %3.0f%%",low * 100.0);
-  fmprstr(out_string);
-  
-  cmov2i(SCALE_XCOORD,SCALE_YCOORD-2*TEXT_SEP);
-  (void) sprintf(out_string,"f: %2d  s: %2d",frame+frame_offset,slice+slice_offset);
-  fmprstr(out_string);
+  sprintf(out_string,"f: %2d  s: %2d",frame+frame_offset,slice+slice_offset);
+  XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+              SCALE_XCOORD, FLIPY(wnd_ptr, SCALE_YCOORD-2*TEXT_SEP), 
+              out_string, strlen(out_string));
 }
 
-void draw_axes(float abscisa_min,
+void draw_axes(struct postf_wind *wnd_ptr,
+               float abscisa_min,
                float abscisa_max,
                float min,
                float max,
@@ -1218,198 +1639,210 @@ void draw_axes(float abscisa_min,
                int initializing
                )
 {
-  static float  y_max, y_tic, y_lo, x_ts, x_l, x_te, y_te,y_min,yy,y_limit;
-  static float px_max,px_tic,px_lo,py_ts,py_l,py_te,px_ls,px_min;
-  static float dx_max,dx_tic,dx_lo,dy_ts,dy_l,dy_te,dx_ls,dx_min;
-  float  x_min, x_max, x_tic, x_lo, y_ts, y_l, x_ls;
+    static float  y_max, y_tic, y_lo, x_ts, x_l, x_te, y_te,y_min,yy,y_limit;
+    static float px_max,px_tic,px_lo,py_ts,py_l,py_te,px_ls,px_min;
+    static float dx_max,dx_tic,dx_lo,dy_ts,dy_l,dy_te,dx_ls,dx_min;
+    float  x_min, x_max, x_tic, x_lo, y_ts, y_l, x_ls;
+    XPoint pt[2];
+    int i;
   
-  char axis_string[MAX_STRING_LENGTH];
-  
-  if (initializing){
-    color(ProfileBackgroundColor);
-    clear();
-    y_min = min;
-    y_max = max;
-    y_tic = (y_max-y_min)/AXES_TICS;
-    y_limit = y_max + y_tic*0.1;
-    y_lo = y_tic/15.0;
-    if (y_min < 0.0 && y_max > 0.0){
-      yy = 0.0; /* at y=0 if data spans 0 */
-      x_ts = -y_tic/TIC_REDUCTION;
-      x_te = 0.0;
-      x_l = 4.0*x_ts;
-    }else{
-      yy = y_min; /* at y=y_min otherwise */
-      x_ts = y_min - y_tic/TIC_REDUCTION;
-      x_te = y_min;
-      x_l = y_min - 3.0*y_tic/TIC_REDUCTION;
-    }
+    char axis_string[MAX_STRING_LENGTH];
     
-    switch(plot_type){
-    case PROFILE:
-      px_min = abscisa_min;
-      px_max = abscisa_max;
-      px_tic = (px_max-px_min)/AXES_TICS;
-      px_lo = px_tic/6.0;
-      py_ts = px_min-px_tic/TIC_REDUCTION;
-      py_te = px_min;
-      py_l = py_ts - 6.0*(py_te-py_ts);
-      if (y_min < 0.0 && y_max > 0.0){
-        px_ls = px_min + px_tic;
-      }else{
-        px_ls = 0.0;
-      }
-      break;
-    case DYNAMIC:
-      dx_min = abscisa_min;
-      dx_max = abscisa_max;
-      dx_tic = (dx_max-dx_min)/AXES_TICS;
-      dx_lo = dx_tic/6.0;
-      dy_ts = dx_min-dx_tic/TIC_REDUCTION;
-      dy_te = dx_min;
-      dy_l = dy_ts - 6.0*(dy_te-dy_ts);
-      if (y_min < 0.0 && y_max > 0.0){
-        dx_ls = dx_min + dx_tic;
-      }else{
-        dx_ls = 0.0;
-      }
-      break;
-    }
+    if (initializing){
+        if (wnd_ptr != NULL) {
+            XSetForeground(_xDisplay, wnd_ptr->gc, ProfileBackgroundColor);
+            XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+                           0, 0,
+                           AUXILLARY_WINDOW_WIDTH, AUXILLARY_WINDOW_HEIGHT);
+        }
+
+        y_min = min;
+        y_max = max;
+        y_tic = (y_max-y_min)/AXES_TICS;
+        y_limit = y_max + y_tic*0.1;
+        y_lo = y_tic/15.0;
+        if (y_min < 0.0 && y_max > 0.0) {
+            yy = 0.0; /* at y=0 if data spans 0 */
+            x_ts = -y_tic/TIC_REDUCTION;
+            x_te = 0.0;
+            x_l = 4.0*x_ts;
+        }
+        else {
+            yy = y_min; /* at y=y_min otherwise */
+            x_ts = y_min - y_tic/TIC_REDUCTION;
+            x_te = y_min;
+            x_l = y_min - 3.0*y_tic/TIC_REDUCTION;
+        }
     
-  }else{
-    float point[XY];
+        switch (plot_type) {
+        case PROFILE:
+            px_min = abscisa_min;
+            px_max = abscisa_max;
+            px_tic = (px_max-px_min)/AXES_TICS;
+            px_lo = px_tic/6.0;
+            py_ts = px_min-px_tic/TIC_REDUCTION;
+            py_te = px_min;
+            py_l = py_ts - 6.0*(py_te-py_ts);
+            if (y_min < 0.0 && y_max > 0.0){
+                px_ls = px_min + px_tic;
+            }
+            else{
+                px_ls = 0.0;
+            }
+            break;
+        case DYNAMIC:
+            dx_min = abscisa_min;
+            dx_max = abscisa_max;
+            dx_tic = (dx_max-dx_min)/AXES_TICS;
+            dx_lo = dx_tic/6.0;
+            dy_ts = dx_min-dx_tic/TIC_REDUCTION;
+            dy_te = dx_min;
+            dy_l = dy_ts - 6.0*(dy_te-dy_ts);
+            if (y_min < 0.0 && y_max > 0.0) {
+                dx_ls = dx_min + dx_tic;
+            }
+            else{
+                dx_ls = 0.0;
+            }
+            break;
+        }
     
-    switch(plot_type){
-    case PROFILE:
-      x_min = px_min;
-      x_max = px_max;
-      x_tic = px_tic;
-      x_lo = px_lo;
-      y_ts = py_ts;
-      y_te = py_te;
-      y_l = py_l;
-      x_ls = px_ls;
-      break;
-    case DYNAMIC:
-      x_min = dx_min;
-      x_max = dx_max;
-      x_tic = dx_tic;
-      x_lo = dx_lo;
-      y_ts = dy_ts;
-      y_te = dy_te;
-      y_l = dy_l;
-      x_ls = dx_ls;
-      break;
     }
+    else{
+        float point[XY];
     
-    color(AxisColor);
+        switch (plot_type) {
+        case PROFILE:
+            x_min = px_min;
+            x_max = px_max;
+            x_tic = px_tic;
+            x_lo = px_lo;
+            y_ts = py_ts;
+            y_te = py_te;
+            y_l = py_l;
+            x_ls = px_ls;
+            break;
+        case DYNAMIC:
+            x_min = dx_min;
+            x_max = dx_max;
+            x_tic = dx_tic;
+            x_lo = dx_lo;
+            y_ts = dy_ts;
+            y_te = dy_te;
+            y_l = dy_l;
+            x_ls = dx_ls;
+            break;
+        }
     
-    /* draw x axis */
-    point[X] = x_min;
-    point[Y] = yy;
-    bgnline();
-    {
-      v2f(point);
-      point[X] = x_max;
-      v2f(point);
-    }
-    endline(); /* x tics */
-    for (point[X] = x_ls; point[X] <= x_max; point[X] += x_tic){
-      point[Y] = x_ts;
-      bgnline();
-      {
-        v2f(point);
-        point[Y] = x_te;
-        v2f(point);
-      }
-      endline();
-      cmov2(point[X]-x_lo,x_l);
-      (void) sprintf(axis_string,"%5.1f",point[X]);
-      fmprstr(axis_string);
-    }
+        /* draw x axis */
+        XSetForeground(_xDisplay, wnd_ptr->gc, AxisColor);
+
+        pt[0].x = scalex(wnd_ptr, x_min);
+        pt[0].y = scaley(wnd_ptr, yy);
+        pt[1].x = scalex(wnd_ptr, x_max);
+        pt[1].y = pt[0].y;
+
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                   CoordModeOrigin);
+
+        for (point[X] = x_ls; point[X] <= x_max; point[X] += x_tic){
+            pt[0].x = scalex(wnd_ptr, point[X]);
+            pt[0].y = scaley(wnd_ptr, x_ts);
+            pt[1].x = pt[0].x;
+            pt[1].y = scaley(wnd_ptr, x_te);
+            
+            XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                       CoordModeOrigin);
+
+            sprintf(axis_string,"%5.1f",point[X]);
+            
+            XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                        scalex(wnd_ptr, point[X] - x_lo), scaley(wnd_ptr, x_l),
+                        axis_string, strlen(axis_string));
+        }
     
-    /* draw y axis */
-    point[X] = x_min;
-    point[Y] = y_min;
-    bgnline();
-    {
-      v2f(point);
-      point[Y] = y_max;
-      v2f(point);
-    }
-    endline(); /* y tics */
-    for (point[Y] = y_min; point[Y] <= y_limit; point[Y] += y_tic){
-      point[X] = y_ts;
-      bgnline();
-      {
-        v2f(point);
-        point[X] = y_te;
-        v2f(point);
-      }
-      endline();
-      cmov2(y_l,point[Y]-y_lo);
-      (void) sprintf(axis_string,"%5.1f",point[Y]);
-      fmprstr(axis_string);
-    }
+        /* draw y axis */
+        pt[0].x = scalex(wnd_ptr, x_min);
+        pt[0].y = scaley(wnd_ptr, y_min);
+        pt[1].x = pt[0].x;
+        pt[1].y = scaley(wnd_ptr, y_max);
+
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                   CoordModeOrigin);
+
+        for (point[Y] = y_min; point[Y] <= y_limit; point[Y] += y_tic) {
+            pt[0].x = scalex(wnd_ptr, y_ts);
+            pt[0].y = scaley(wnd_ptr, point[Y]);
+            pt[1].x = scalex(wnd_ptr, y_te);
+            pt[1].y = pt[0].y;
+
+            XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                       CoordModeOrigin);
+
+            sprintf(axis_string,"%5.1f",point[Y]);
+            XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                        scalex(wnd_ptr, y_l), scaley(wnd_ptr, point[Y] - y_lo),
+                        axis_string, strlen(axis_string));
+        }
+
+        /* Draw the value marker on the Y axis */
+        pt[0].x = scalex(wnd_ptr, y_ts);
+        pt[0].y = scaley(wnd_ptr, v);
+        pt[1].x = scalex(wnd_ptr, y_te);
+        pt[1].y = pt[0].y;
+
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                   CoordModeOrigin);
     
-    point[X] = y_ts;
-    point[Y] = v;
-    bgnline();
-    {
-      v2f(point);
-      point[X] = y_te;
-      v2f(point);
-    }
-    endline();
-    
-    if ((plot_type == DYNAMIC) || (axes & XAXIS)){
-      if (plot_type == DYNAMIC) 
-        color(DynamicColor);
-      else
-        color(ProfileXColor);
-      point[X] = x;
-      if (plot_type == PROFILE) point[X]++;
-      point[Y] = 0;
-      bgnline();
-      {
-        v2f(point);
-        point[Y] = v;
-        v2f(point);
-      }
-      endline();
+        if ((plot_type == DYNAMIC) || (axes & XAXIS)){
+            if (plot_type == DYNAMIC) {
+                XSetForeground(_xDisplay, wnd_ptr->gc, DynamicColor);
+            }
+            else {
+                XSetForeground(_xDisplay, wnd_ptr->gc, ProfileXColor);
+            }
+            point[X] = x;
+            if (plot_type == PROFILE) {
+                point[X]++;
+            }
+
+            pt[0].x = scalex(wnd_ptr, point[X]);
+            pt[0].y = scaley(wnd_ptr, 0.0);
+            pt[1].x = pt[0].x;
+            pt[1].y = scaley(wnd_ptr, v);
+
+            XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, 
+                       CoordModeOrigin);
     }
     
     if (plot_type == PROFILE){
       if (axes & YAXIS){
-        color(ProfileYColor);
-        point[X] = y+1.0;
-        point[Y] = 0;
-        bgnline();
-        {
-          v2f(point);
-          point[Y] = v;
-          v2f(point);
-        }
-        endline();
+        XSetForeground(_xDisplay, wnd_ptr->gc, ProfileYColor);
+
+        pt[0].x = scalex(wnd_ptr, y+1.0);
+        pt[0].y = scaley(wnd_ptr, 0.0);
+        pt[1].x = pt[0].x;
+        pt[1].y = scaley(wnd_ptr, v);
+
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, CoordModeOrigin);
       }
       
       if (axes & ZAXIS){
-        color(ProfileZColor);
-        point[X] = z+1.0;
-        point[Y] = 0;
-        bgnline();
-        {
-          v2f(point);
-          point[Y] = v;
-          v2f(point);
-        }
-        endline();
+        XSetForeground(_xDisplay, wnd_ptr->gc, ProfileZColor);
+
+        pt[0].x = scalex(wnd_ptr, z+1.0);
+        pt[0].y = scaley(wnd_ptr, 0.0);
+        pt[1].x = pt[0].x;
+        pt[1].y = scaley(wnd_ptr, v);
+
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, pt, 2, CoordModeOrigin);
       }
     }
   }
 }
 
-void draw_profile(unsigned short *image,
+void draw_profile(struct postf_wind *wnd_ptr,
+                  unsigned short *image,
                   unsigned short *dynamic_volume,
                   int width,
                   int height,
@@ -1445,7 +1878,8 @@ void draw_profile(unsigned short *image,
     id = dynamic_volume;
     x_step = (float)MAX(iw,ih)/islices;
     z_step = iframes*is;
-  }else{
+  }
+  else{
     if (!redraw_only){
       ld = image;
       lframe = frame;
@@ -1454,48 +1888,49 @@ void draw_profile(unsigned short *image,
       lz = (float)slice * iw / islices;
       lv = v;
     }
-    
-    color(ProfileBackgroundColor); clear();
-    
+
+    XSetForeground(_xDisplay, wnd_ptr->gc, ProfileBackgroundColor);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0,
+                   AUXILLARY_WINDOW_WIDTH, AUXILLARY_WINDOW_HEIGHT);
+
     if (plot_present || !redraw_only){
-      
-      unsigned short *p;
-      float point[XY];
-      int count;
+        XPoint pt[512];         /* TODO: Count better not be > 512! */
+        int i;
+        unsigned short *p;
+        float point[XY];
+        int count;
       
       if (axes & XAXIS){
         point[X] = 1.0;
         p = ld+(ly*iw);
         count = iw;
         
-        color(ProfileXColor);
-        bgnline();
-        {
-          while(count--){
-            point[Y] = *p++ * icf + ict;
-            v2f(point);
+        XSetForeground(_xDisplay, wnd_ptr->gc, ProfileXColor);
+        for (i = 0; i < count; i++) {
+            pt[i].x = scalex(wnd_ptr, point[X]);
+            point[Y] = (*p++ * icf + ict);
+            pt[i].y = scaley(wnd_ptr, point[Y]);
             point[X]++;
-          }
         }
-        endline();
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                   pt, count, CoordModeOrigin);
       }
       
       if (axes & YAXIS){
         point[X] = 1.0;
         p = ld+lx;
         count = ih;
-        
-        color(ProfileYColor);
-        bgnline();
-        {
-          while(count--){
+
+        XSetForeground(_xDisplay, wnd_ptr->gc, ProfileYColor);
+        for (i = 0; i < count; i++) {
             point[Y] = *p * icf + ict;
-            v2f(point);
+            pt[i].x = scalex(wnd_ptr, point[X]);
+            pt[i].y = scaley(wnd_ptr, point[Y]);
             point[X]++;
             p+=iw;
-          }
         }
-        endline();
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                   pt, count, CoordModeOrigin);
       }
       
       if (axes & ZAXIS){
@@ -1503,23 +1938,25 @@ void draw_profile(unsigned short *image,
         p = id + lframe*is + ly*iw + lx;
         count = islices;
         
-        color(ProfileZColor);
-        bgnline();
-        {
-          while(count--){
+        XSetForeground(_xDisplay, wnd_ptr->gc, ProfileZColor);
+        for (i = 0; i < count; i++) {
             point[Y] = *p * icf + ict;
-            v2f(point);
+            pt[i].x = scalex(wnd_ptr, point[X]);
+            pt[i].y = scaley(wnd_ptr, point[Y]);
             point[X]+=x_step;
             p+=z_step;
-          }
         }
-        endline();
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                   pt, count, CoordModeOrigin);
       }
       
-      draw_axes(NIL,NIL,NIL,NIL,lx,ly,lz,axes,lv,PROFILE,NOT_INITIALIZE);
-      if (!plot_present) plot_present = TRUE;
+      draw_axes(wnd_ptr,
+                NIL,NIL,NIL,NIL,lx,ly,lz,axes,lv,PROFILE,NOT_INITIALIZE);
+      if (!plot_present) {
+          plot_present = TRUE;
+      }
     }
-    swapbuffers();
+    swapbuffers(wnd_ptr);
   }
 }
 
@@ -1605,7 +2042,8 @@ int get_roi_tac(unsigned short *dynamic_volume,
 
 }
 
-void draw_dynamic(unsigned short *dynamic_volume,
+void draw_dynamic(struct postf_wind *wnd_ptr,
+                  unsigned short *dynamic_volume,
                   float *time,
                   int frames,
                   int frame,
@@ -1627,6 +2065,7 @@ void draw_dynamic(unsigned short *dynamic_volume,
   static int is,iw,ih,lx,ly,iframes,lframe,lslice,lroi_radius;
   static unsigned short *id;
   static float lv,icf,ict,*itime,*roi_tac,*roi_std;
+  XPoint pt[512];               /* iframes better not be > 512 */
   
   if (initialize){
     iw = width;
@@ -1639,7 +2078,8 @@ void draw_dynamic(unsigned short *dynamic_volume,
     roi_tac = (float *)malloc(sizeof(float)*(iframes));
     roi_std = (float *)malloc(sizeof(float)*(iframes));
     id = dynamic_volume;
-  }else{
+  }
+  else{
     if (!redraw_only){
       lv = v;
       lx = x;
@@ -1649,8 +2089,11 @@ void draw_dynamic(unsigned short *dynamic_volume,
       lroi_radius = roi_radius;
       offset = slice * iframes * is + x + iw * y;
     }
-    color(ProfileBackgroundColor); clear();
-    
+
+    XSetForeground(_xDisplay, wnd_ptr->gc, ProfileBackgroundColor);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0,
+                   AUXILLARY_WINDOW_WIDTH, AUXILLARY_WINDOW_HEIGHT);
+
     if (plot_present || !redraw_only){
       
       int present_frame;
@@ -1658,21 +2101,20 @@ void draw_dynamic(unsigned short *dynamic_volume,
       float *t;
       
       t = itime;
-      
-      color(DynamicColor);
+
+      XSetForeground(_xDisplay, wnd_ptr->gc, DynamicColor);
       
       if (lroi_radius == 0){
         if (roi_dump) printf("%5d\t%10d\n", x+1, y+1);
-        bgnline();
-        {
-          for (present_frame = 0; present_frame < iframes; present_frame++){
+        for (present_frame = 0; present_frame < iframes; present_frame++){
             point[Y] = *(id + offset + present_frame * is) * icf + ict;
             point[X] = *t++;
+            pt[present_frame].x = scalex(wnd_ptr, point[X]);
+            pt[present_frame].y = scaley(wnd_ptr, point[Y]);
             if (roi_dump) printf("%5.2f\t%10f\n", point[X], point[Y]);
-            v2f(point);
-          }
         }
-        endline();
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+                   pt, iframes, CoordModeOrigin);
       } else {
         int roi_area;
         roi_area = get_roi_tac(id,
@@ -1690,126 +2132,131 @@ void draw_dynamic(unsigned short *dynamic_volume,
                                roi_tac,
                                roi_std);
         if (roi_dump) printf("%5d\t%10d\t%10d\n", x+1, y+1, roi_area);
-        bgnline();
-        {
-          for (present_frame = 0; present_frame < iframes; present_frame++){
+        for (present_frame = 0; present_frame < iframes; present_frame++){
             point[Y] = *(roi_tac + present_frame);
             point[X] = *t++;
+            pt[present_frame].x = scalex(wnd_ptr, point[X]);
+            pt[present_frame].y = scaley(wnd_ptr, point[Y]);
             if (roi_dump) 
               printf("%5.2f\t%10f\t%10f\n", point[X], point[Y], *(roi_std+present_frame));
-            v2f(point);
-          }
         }
-        endline();
+        XDrawLines(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 
+                   pt, iframes, CoordModeOrigin);
         lv = *(roi_tac+lframe);
       }
       
-      draw_axes(NIL,NIL,NIL,NIL,itime[lframe],NIL,NIL,NIL,lv,DYNAMIC,NOT_INITIALIZE);
+      draw_axes(wnd_ptr, NIL,NIL,NIL,NIL,itime[lframe],NIL,NIL,NIL,lv,DYNAMIC,NOT_INITIALIZE);
       if (!plot_present) plot_present = TRUE;
     }
-    swapbuffers();
+    swapbuffers(wnd_ptr);
   }
 }
 
-void evaluate_pixel(short position[XY],
-                    unsigned short *image,
-                    int frame,
-                    int slice,
-                    float cfact,
-                    float cterm,
-                    int width,
-                    int height,
-                    int size,
-                    int roi_radius,
-                    int profiling,
-                    int profile_frozen,
-                    int dynamic,
-                    int dynamic_frozen,
-                    int axes,
-                    long main_window,
-                    long profile_window,
-                    long dynamic_window,
-                    int roi_dump
-                    )
+void 
+evaluate_pixel(int position[XY],
+               unsigned short *image,
+               int frame,
+               int slice,
+               float cfact,
+               float cterm,
+               int width,
+               int height,
+               int size,
+               int roi_radius,
+               int profiling,
+               int profile_frozen,
+               int dynamic,
+               int dynamic_frozen,
+               int axes,
+               struct postf_wind *main_window,
+               struct postf_wind *profile_window,
+               struct postf_wind *dynamic_window,
+               int roi_dump
+               )
 {
-  static short lx,ly;
-  int roi_area;
-  short x,y;
-  float v, std;
+    static short lx,ly;
+    int roi_area;
+    short x,y;
+    float v, std;
   
-  x = position[X];
-  y = position[Y];
+    x = position[X];
+    y = position[Y];
   
-  if (x >= 0 && x < width && y >= 0 && y < height){
-    lx = x; ly = y;
-    if (roi_radius != 0){
-      roi_area = get_roi_tac(image,1,0,0,lx,ly,width,height,size,
-                             cfact,cterm,roi_radius,&v,&std);
-    }else{
-      roi_area = 1;
-      v = *(image+lx+width*ly) * cfact + cterm;
+    if (x >= 0 && x < width && y >= 0 && y < height){
+        lx = x; ly = y;
+        if (roi_radius != 0){
+            roi_area = get_roi_tac(image,1,0,0,lx,ly,width,height,size,
+                                   cfact,cterm,roi_radius,&v,&std);
+        }
+        else{
+            roi_area = 1;
+            v = *(image+lx+width*ly) * cfact + cterm;
+        }
+        frontbuffer(main_window, 1);
+        write_eval_pixel(main_window, lx + 1, ly + 1, v, roi_area, FALSE);
+        frontbuffer(main_window, 0);
+        if (profile_window != NULL && !profile_frozen) {
+            draw_profile(profile_window, 
+                         image,NIL,NIL,NIL,lx,ly,v,NIL,NIL,NIL,NIL,
+                         frame,slice,axes,NOT_INITIALIZE,NOT_REDRAW_ONLY);
+        }
+        if (dynamic_window != NULL && !dynamic_frozen) {
+            draw_dynamic(dynamic_window, 
+                         NIL,NIL,NIL,frame,slice,lx,ly,NIL,NIL,v,NIL,NIL,
+                         roi_radius,NOT_INITIALIZE,NOT_REDRAW_ONLY,roi_dump);
+        }
     }
-    frontbuffer(TRUE);
-    write_eval_pixel(lx+1,ly+1,v,roi_area,FALSE);
-    frontbuffer(FALSE);
-    if (profiling && !profile_frozen){
-      winset(profile_window);
-      draw_profile(image,NIL,NIL,NIL,lx,ly,v,NIL,NIL,NIL,NIL,
-                   frame,slice,axes,NOT_INITIALIZE,NOT_REDRAW_ONLY);
-      winset(main_window);
-    }
-    if (dynamic && !dynamic_frozen){
-      winset(dynamic_window);
-      draw_dynamic(NIL,NIL,NIL,frame,slice,lx,ly,NIL,NIL,v,NIL,NIL,
-                   roi_radius,NOT_INITIALIZE,NOT_REDRAW_ONLY,roi_dump);
-      winset(main_window);
-    }
-  }
 }
 
-void calculate_conversions(float min,float max,float *cfact,float *cterm)
+void
+calculate_conversions(float min,float max,float *cfact,float *cterm)
 {
-  float dynamic_range;
-  dynamic_range = max - min;
-  *cfact = dynamic_range / index_range;
-  *cterm = -index_min * dynamic_range / index_range + min;
+    float dynamic_range;
+    dynamic_range = max - min;
+    *cfact = dynamic_range / index_range;
+    *cterm = -index_min * dynamic_range / index_range + min;
 }
 
-void draw_cursor(short *position, int radius)
+void 
+draw_cursor(struct postf_wind *wnd_ptr, int *position, int radius)
 {
-    static short
+    static int
         left = 0,
         right = WINDOW_WIDTH-1,
         bottom = 0,
         top = WINDOW_HEIGHT-1;
     long point[XY];
     static int o_r = 0;
-    static Screencoord o_x = -1, o_y = -1;
+    static int o_x = -1, o_y = -1;
+    XPoint pt[2];
 
-    drawmode(OVERDRAW);
-    XSetFunction(getXdpy(), getXgc(), GXxor);
-    color(WHITE);
+    XSetFunction(_xDisplay, wnd_ptr->gc, GXxor);
+    XSetForeground(_xDisplay, wnd_ptr->gc, WhitePixel(_xDisplay, _xScreen));
 
     if (o_x > 0 && o_y > 0) {
         if (o_r != 0) {
-            circs(o_x, o_y, (short)o_r);
+            XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                     o_x-o_r,
+                     FLIPY(wnd_ptr, o_y+o_r),
+                     2*o_r,
+                     2*o_r,
+                     0,
+                     360*64);
         }
         else {
-            bgnline();
-            point[X] = left;
-            point[Y] = o_y;
-            v2i(point);
-            point[X] = right;
-            v2i(point);
-            endline();
+            pt[0].x = left;
+            pt[0].y = FLIPY(wnd_ptr, o_y);
+            pt[1].x = right;
+            pt[1].y = FLIPY(wnd_ptr, o_y);
+            XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                       pt, 2, CoordModeOrigin);
 
-            bgnline();
-            point[X] = o_x;
-            point[Y] = bottom;
-            v2i(point);
-            point[Y] = top;
-            v2i(point);
-            endline();
+            pt[0].x = o_x;
+            pt[0].y = FLIPY(wnd_ptr, bottom);
+            pt[1].x = o_x;
+            pt[1].y = FLIPY(wnd_ptr, top);
+            XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                       pt, 2, CoordModeOrigin);
         }
         o_x = -1;
         o_y = -1;
@@ -1820,293 +2267,382 @@ void draw_cursor(short *position, int radius)
             position[Y] > bottom && position[Y] < top){
  
             if (radius != 0) {
-                circs(position[X], position[Y], (short)(radius));
+                XDrawArc(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                         position[X]-radius,
+                         FLIPY(wnd_ptr, position[Y]+radius),
+                         2*radius,
+                         2*radius,
+                         0,
+                         360*64);
             }
             else {
-                bgnline();
-                point[X] = left;
-                point[Y] = position[Y];
-                v2i(point);
-                point[X] = right;
-                v2i(point);
-                endline();
+                pt[0].x = left;
+                pt[0].y = FLIPY(wnd_ptr, position[Y]);
+                pt[1].x = right;
+                pt[1].y = FLIPY(wnd_ptr, position[Y]);
 
-                bgnline();
-                point[X] = position[X];
-                point[Y] = bottom;
-                v2i(point);
-                point[Y] = top;
-                v2i(point);
-                endline();
+                XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                           pt, 2, CoordModeOrigin);
+
+                pt[0].x = position[X];
+                pt[0].y = FLIPY(wnd_ptr, bottom);
+                pt[1].x = position[X];
+                pt[1].y = FLIPY(wnd_ptr, top);
+
+                XDrawLines(_xDisplay, wnd_ptr->wind, wnd_ptr->gc,
+                           pt, 2, CoordModeOrigin);
             }
             o_x = position[X];
             o_y = position[Y];
             o_r = radius;
         }
     }
-    XSetFunction(getXdpy(), getXgc(), GXcopy);
-    drawmode(NORMALDRAW);
+    XSetFunction(_xDisplay, wnd_ptr->gc, GXcopy);
 }
 
-void erase_cursor()
+void 
+erase_cursor(struct postf_wind *wnd_ptr)
 {
-    draw_cursor(NULL, 0);
+    draw_cursor(wnd_ptr, NULL, 0);
 }
 
-void draw_color_bar(unsigned short *color_bar, float min, float max)
+void 
+draw_color_bar(struct postf_wind *wnd_ptr,
+               unsigned short *color_bar, float min, float max)
 {
-  Screencoord x,y; char scale_string[MAX_STRING_LENGTH]; int step; float range;
-  static long
-    v1[XY] = {WINDOW_WIDTH+COLOR_BAR_XOFFSET,COLOR_BAR_YOFFSET-1},
-    v2[XY] = {WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH-1,COLOR_BAR_YOFFSET-1},
-    v3[XY] = {WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH-1,COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT-1},
-    v4[XY] = {WINDOW_WIDTH+COLOR_BAR_XOFFSET,COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT-1};
-  
-  rectwrite((Screencoord)v1[X],(Screencoord)v1[Y],(Screencoord)v3[X],(Screencoord)v3[Y],(Colorindex *)color_bar);
-  x = v2[X];
-  range = (max - min) / SCALE_TICS;
-  color(TextColor);
-  for (step = 0; step <= SCALE_TICS; step++){
-    y = (float)step * SCALE_STEP + COLOR_BAR_YOFFSET;
-    cmov2i(x,y-4.0);
-    (void) sprintf(scale_string,"-%-7.1f", range * step + min);
-    fmprstr(scale_string);
-  }
-  bgnline();
-  {
-    v2i(v1);
-    v2i(v2);
-    v2i(v3);
-    v2i(v4);
-    v2i(v1);
-  }
-  endline();
-}
-
-void clip_image(short *anchor,
-                unsigned short *image,
-                unsigned short *clipping_buffer,
-                long width,
-                long height,
-                long new_width,
-                long new_height)
-{
-  short y;
-  
-  for (y = 0; y < new_height; y++)
-    (void) memcpy(&clipping_buffer[y * new_width],
-                  &image[(y + anchor[Y]) * width + anchor[X]],
-                  new_width * sizeof(unsigned short));
-}
-
-
-void draw_image(short *draw_origin,
-                unsigned short *image,
-                unsigned short *clipping_buffer,
-                long image_width,
-                long image_height,
-                float zoom)
-{
-  short
-    anchor[XY],
-    new_origin[XY],
-    new_width,
-    new_height;
-  static Screencoord
-    cleft = 0,
-    cright = WINDOW_WIDTH,
-    cbottom = 0,
-    ctop = WINDOW_HEIGHT;
-  
-  color(ImageBackgroundColor); clear();
-  pushviewport();
-  viewport(cleft,cright,cbottom,ctop);
-  rectzoom(zoom,zoom);
-  
-  if (draw_origin[X] < 0 || draw_origin[Y] < 0){
+    int x,y; 
+    char scale_string[MAX_STRING_LENGTH]; 
+    int step; 
+    float range;
+    XImage *xi;
     
-    if (draw_origin[X] < 0){
-      anchor[X] = -draw_origin[X]/zoom;
-      new_origin[X] = 0;
-      new_width = image_width - anchor[X];
-    }else{
-      anchor[X] = 0;
-      new_origin[X] = draw_origin[X];
-      new_width = image_width;
+    xi = XCreateImage(_xDisplay, _xVisual, _xDepth, ZPixmap,
+                      0, NULL, COLOR_BAR_WIDTH, COLOR_BAR_HEIGHT, 8, 0);
+    xi->data = malloc(xi->bytes_per_line * COLOR_BAR_HEIGHT);
+    for (x = 0; x < COLOR_BAR_WIDTH; x++) {
+        for (y = 0; y < COLOR_BAR_HEIGHT; y++) {
+            int iy = COLOR_BAR_HEIGHT - (y + 1);
+            XPutPixel(xi, x, iy, xclr(color_bar[x + (y * COLOR_BAR_WIDTH)]));
+        }
     }
+    XPutImage(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, xi, 0, 0,
+              WINDOW_WIDTH+COLOR_BAR_XOFFSET,
+              84, COLOR_BAR_WIDTH, COLOR_BAR_HEIGHT);
+    XDestroyImage(xi);
     
-    if (draw_origin[Y] < 0){
-      anchor[Y] = -draw_origin[Y]/zoom;
-      new_origin[Y] = 0;
-      new_height = image_height - anchor[Y];
-    }else{
-      anchor[Y] = 0;
-      new_origin[Y] = draw_origin[Y];
-      new_height = image_height;
+    x = WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH;
+    range = (max - min) / SCALE_TICS;
+    XSetForeground(_xDisplay, wnd_ptr->gc, TextColor);
+    for (step = 0; step <= SCALE_TICS; step++){
+        y = (float)step * SCALE_STEP + COLOR_BAR_YOFFSET;
+        sprintf(scale_string,"-%-7.1f", range * step + min);
+        XDrawString(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                    x, FLIPY(wnd_ptr, y-4), 
+                    scale_string, strlen(scale_string));
     }
-    
-    if (new_width > 0 && new_height > 0){
-      clip_image(anchor,
-                 image,
-                 clipping_buffer,
-                 image_width,
-                 image_height,
-                 new_width,
-                 new_height);         
-      rectwrite((Screencoord)new_origin[X],
-                (Screencoord)new_origin[Y],
-                (Screencoord)new_width-1+new_origin[X],
-                (Screencoord)new_height-1+new_origin[Y],
-                (Colorindex *)clipping_buffer);
-    }
-    
-  }else{
-    
-    rectwrite((Screencoord)draw_origin[X],
-              (Screencoord)draw_origin[Y],
-              (Screencoord)image_width-1+draw_origin[X],
-              (Screencoord)image_height-1+draw_origin[Y],
-              (Colorindex *)image);
-    
-  }
-  
-  rectzoom(1.0,1.0);
-  popviewport();
-  
+
+    XDrawRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+                   WINDOW_WIDTH+COLOR_BAR_XOFFSET,
+                   84,          /* TODO: Why??? */
+                   COLOR_BAR_WIDTH,
+                   COLOR_BAR_HEIGHT);
 }
 
-void usage(char *program_name)
+void
+clip_image(short *anchor,
+           unsigned short *image,
+           unsigned short *clipping_buffer,
+           long width,
+           long height,
+           long new_width,
+           long new_height)
 {
-  (void) fprintf(stderr,"Usage: %s [option [...]] [filename]\n", program_name);
-  exit(ERROR_STATUS);
+    short y;
+  
+    for (y = 0; y < new_height; y++)
+        memcpy(&clipping_buffer[y * new_width],
+               &image[(y + anchor[Y]) * width + anchor[X]],
+               new_width * sizeof(unsigned short));
 }
 
-long create_window(char *main_title,
-                   float x_min,
-                   float x_max,
-                   float min,
-                   float max,
-                   int axes,
-                   int plot_type,
-                   long *origin,
-                   long *size
-                   )
+
+void 
+draw_image(struct postf_wind *wnd_ptr,
+           int *draw_origin,
+           unsigned short *image,
+           unsigned short *clipping_buffer,
+           long image_width,
+           long image_height,
+           float zoom)
 {
-  long window_id; char title_string[MAX_STRING_LENGTH];
-  float x_range, y_range;
-  static int prof_init = FALSE;
-  static int dyna_init = FALSE;
-  
-  x_range = x_max - x_min;
-  y_range = max - min;
-  (void) sprintf(title_string,"%s: %s profile",
-                 main_title,(plot_type == PROFILE)?"slice":"dynamic");
-  if (plot_type == PROFILE && !prof_init || plot_type == DYNAMIC && !dyna_init){
-    size[X] = AUXILLARY_WINDOW_WIDTH;
-    size[Y] = AUXILLARY_WINDOW_HEIGHT;
-    prefsize(size[X],size[Y]);
-  }else{
-    prefposition(origin[X],origin[X]+size[X]-1,origin[Y],origin[Y]+size[Y]-1);
-  }
-  window_id = winopen(title_string);
-  doublebuffer(); gconfig();
-  if (plot_type == PROFILE && !prof_init || plot_type == DYNAMIC && !dyna_init){
-    getorigin(&origin[X],&origin[Y]);
-    switch (plot_type){
+    short
+        anchor[XY],
+        new_origin[XY],
+        new_width,
+        new_height;
+    static int
+        cleft = 0,
+        cright = WINDOW_WIDTH,
+        cbottom = 0,
+        ctop = WINDOW_HEIGHT;
+    XImage *xi;
+    int x, y;
+    unsigned short *tptr;
+    int r;
+
+    XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
+    XFillRectangle(_xDisplay, wnd_ptr->draw, wnd_ptr->gc, 0, 0, WINDOW_WIDTH,
+                   WINDOW_HEIGHT);
+
+    if (draw_origin[X] < 0 || draw_origin[Y] < 0){
+        if (draw_origin[X] < 0){
+            anchor[X] = -draw_origin[X]/zoom;
+            new_origin[X] = 0;
+            new_width = image_width - anchor[X];
+        }
+        else {
+            anchor[X] = 0;
+            new_origin[X] = draw_origin[X];
+            new_width = image_width;
+        }
+    
+        if (draw_origin[Y] < 0) {
+            anchor[Y] = -draw_origin[Y]/zoom;
+            new_origin[Y] = 0;
+            new_height = image_height - anchor[Y];
+        }
+        else{
+            anchor[Y] = 0;
+            new_origin[Y] = draw_origin[Y];
+            new_height = image_height;
+        }
+    
+        if (new_width > 0 && new_height > 0) {
+
+            clip_image(anchor,
+                       image,
+                       clipping_buffer,
+                       image_width,
+                       image_height,
+                       new_width,
+                       new_height);
+#if !DO_RESAMPLE
+            image_height = new_height;
+            image_width = new_width;
+#endif /* DO_RESAMPLE */
+
+            new_width *= zoom;
+            new_height *= zoom;
+            tptr = clipping_buffer;
+        }
+    
+    }
+    else {
+        new_width = image_width*zoom;
+        new_height = image_height*zoom;
+        new_origin[X] = draw_origin[X];
+        new_origin[Y] = draw_origin[Y];
+        tptr = image;
+    }
+
+    xi = XCreateImage(_xDisplay,
+                      _xVisual,
+                      _xDepth,
+                      ZPixmap,  /* Format */
+                      0,        /* Offset */
+#if DO_RESAMPLE
+                      resample_function(image,
+                                        image_width,
+                                        image_height,
+                                        new_width,
+                                        new_height,
+                                        True),
+#else
+                      NULL,	/* Data */
+#endif /* DO_RESAMPLE */
+                      new_width, /* Width */
+                      new_height, /* Height */
+                      8,        /* BitmapPad */
+                      0);       /* BytesPerLine */
+
+#if DO_RESAMPLE
+    xi->data = (char*) malloc(xi->bytes_per_line * new_height);
+    if (xi->data == NULL) {
+        fprintf(stderr, "yikes: can't allocate memory.\n");
+        exit(1);
+    }
+    for (x = 0; x < new_width; x++) {
+        for (y = 0; y < new_height; y++) {
+            int iy = new_height - (y + 1);
+            XPutPixel(xi, x, iy, 
+                      xclr(tptr[(long)((1.0/zoom) * x) + image_width * (long)((1.0/zoom) * y)]));
+        }
+    }
+#endif /* DO_RESAMPLE */
+    XPutImage(_xDisplay, wnd_ptr->draw, wnd_ptr->gc,
+              xi, 0, 0, 
+              new_origin[X], new_origin[Y],
+              new_width, 
+              new_height);
+    XDestroyImage(xi);
+}
+
+void
+usage(char *program_name)
+{
+    fprintf(stderr,"Usage: %s [option [...]] [filename]\n", program_name);
+    exit(ERROR_STATUS);
+}
+
+struct postf_wind *
+create_basic_window(char *window_name, int width, int height)
+{
+    struct postf_wind *wnd_ptr;
+    int a, b;
+    int blackColor = BlackPixel(_xDisplay, _xScreen);
+
+    wnd_ptr = malloc(sizeof(struct postf_wind));
+    if (wnd_ptr == NULL) {
+        return (NULL);
+    }
+
+    wnd_ptr->display = _xDisplay;
+    wnd_ptr->visual = _xVisual;
+    wnd_ptr->wind = XCreateSimpleWindow(_xDisplay, 
+                                        DefaultRootWindow(_xDisplay), 
+                                        0, 0, 
+                                        width,
+                                        height,
+                                        0,
+                                        blackColor,
+                                        blackColor);
+    XStoreName(_xDisplay, wnd_ptr->wind, window_name);
+    wnd_ptr->gc = XCreateGC(_xDisplay, wnd_ptr->wind, 0, NULL);
+
+    if (XdbeQueryExtension(_xDisplay, &a, &b)) {
+        wnd_ptr->draw = XdbeAllocateBackBufferName(_xDisplay, 
+                                                   wnd_ptr->wind, 
+                                                   XdbeUndefined);
+    }
+
+    wnd_ptr->wbuf[0] = wnd_ptr->wind;
+    wnd_ptr->wbuf[1] = wnd_ptr->draw;
+
+    XMapWindow(_xDisplay, wnd_ptr->wind);
+
+    wnd_ptr->vl = 0;
+    wnd_ptr->vb = 0;
+    wnd_ptr->vw = width;
+    wnd_ptr->vh = height;
+    return (wnd_ptr);
+}
+
+struct postf_wind *
+create_window(char *main_title,
+              float x_min,
+              float x_max,
+              float y_min,
+              float y_max,
+              int axes,
+              int plot_type,
+              int *origin,
+              int *size
+              )
+{
+    struct postf_wind *wnd_ptr;
+    char title_string[MAX_STRING_LENGTH];
+    float x_range, y_range;
+    static int prof_init = FALSE;
+    static int dyna_init = FALSE;
+
+    x_range = x_max - x_min;
+    y_range = y_max - y_min;
+
+    sprintf(title_string,"%s: %s profile",
+            main_title, (plot_type == PROFILE) ? "slice" : "dynamic");
+
+    wnd_ptr = create_basic_window(title_string,
+                                  AUXILLARY_WINDOW_WIDTH,
+                                  AUXILLARY_WINDOW_HEIGHT);
+
+    if (plot_type == PROFILE && !prof_init || 
+        plot_type == DYNAMIC && !dyna_init){
+        switch (plot_type){
+        case PROFILE:
+            prof_init = TRUE;
+            break;
+        case DYNAMIC:
+            dyna_init = TRUE;
+            break;
+        }
+    }
+    /* Set up orthographic projection for this window.
+     */
+    my_ortho2(wnd_ptr, 
+              x_min-x_range/(AXES_TICS*EXPAND),
+              x_max+x_range/(AXES_TICS*EXPAND),
+              y_min-y_range/(AXES_TICS*EXPAND),
+              y_max+y_range/(AXES_TICS*EXPAND)
+              );
+
+    switch (plot_type) {
     case PROFILE:
-      prof_init = TRUE;
-      break;
+        draw_profile(wnd_ptr, NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
+                     NIL,NIL,NIL,axes,NOT_INITIALIZE,REDRAW_ONLY);
+        break;
     case DYNAMIC:
-      dyna_init = TRUE;
-      break;
+        draw_dynamic(wnd_ptr, NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
+                     NIL,NIL,NIL,NOT_INITIALIZE,REDRAW_ONLY,NIL);
+        break;
     }
-  }
-  ortho2((Coord)(x_min-x_range/(AXES_TICS*EXPAND)),
-         (Coord)(x_max+x_range/(AXES_TICS*EXPAND)),
-         (Coord)(min-y_range/(AXES_TICS*EXPAND)),
-         (Coord)(max+y_range/(AXES_TICS*EXPAND))
-         );
-  /* winconstraints(); winconstraints(); */
-  switch (plot_type){
-  case PROFILE:
-    draw_profile(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                 NIL,NIL,NIL,axes,NOT_INITIALIZE,REDRAW_ONLY);
-    break;
-  case DYNAMIC:
-    draw_dynamic(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                 NIL,NIL,NIL,NOT_INITIALIZE,REDRAW_ONLY,NIL);
-    break;
-  }
-  return(window_id);
+    return (wnd_ptr);
 }
 
-void destroy_window(long window_id)
+void 
+destroy_window(struct postf_wind *wnd_ptr)
 {
-  winclose(window_id);
+    XEvent ev;
+
+    XdbeDeallocateBackBufferName(_xDisplay, wnd_ptr->wbuf[1]);
+    XUnmapWindow(_xDisplay, wnd_ptr->wind);
+    XFreeGC(_xDisplay, wnd_ptr->gc);
+    XDestroyWindow(_xDisplay, wnd_ptr->wind);
+    XSync(_xDisplay, 0);
+    while (XCheckWindowEvent(_xDisplay, wnd_ptr->wind, POSTF_X_EVENT_MASK, &ev)) {
+      fprintf(stderr, "winclose: dropped %d for window 0x%x\n",
+	      ev.type, wnd_ptr->wind);
+    }
+    free(wnd_ptr);
 }
 
-void set_overlay()
+void 
+draw_new_slice(struct postf_wind *wnd_ptr,
+               int *draw_origin,
+               int frame,
+               int slice,
+               int frame_offset,
+               int slice_offset,
+               int image_width,
+               int image_height,
+               float min,
+               float max,
+               float low,
+               float high,
+               unsigned short *image,
+               unsigned short *clipping_buffer,
+               float zoom,
+               unsigned short *color_bar,
+               int redraw)
 {
+    draw_image(wnd_ptr, draw_origin,image,clipping_buffer,image_width,image_height,zoom);
+    draw_color_bar(wnd_ptr, color_bar,min,max);
+    write_eval_pixel(wnd_ptr, 0,0,0,0,redraw);
+    write_scale(wnd_ptr, low,high,frame,slice,frame_offset,slice_offset);
+    swapbuffers(wnd_ptr);
 }
 
-void draw_new_slice(short *draw_origin,
-                    int frame,
-                    int slice,
-                    int frame_offset,
-                    int slice_offset,
-                    int image_width,
-                    int image_height,
-                    float min,
-                    float max,
-                    float low,
-                    float high,
-                    unsigned short *image,
-                    unsigned short *clipping_buffer,
-                    float zoom,
-                    unsigned short *color_bar,
-                    int redraw)
-{
-  draw_image(draw_origin,image,clipping_buffer,image_width,image_height,zoom);
-  draw_color_bar(color_bar,min,max);
-  write_eval_pixel(0,0,0,0,redraw);
-  write_scale(low,high,frame,slice,frame_offset,slice_offset);
-  swapbuffers();
-}
-
-void make_map_mode_icon(unsigned short *image,
-                        unsigned short *sicon,
-                        int image_width,
-                        int image_height,
-                        int icon_width,
-                        int icon_height)
-{
-  int
-    x, x_step, x_skip,
-    y, y_step, y_skip;
-  
-  x_step = image_width / icon_width;
-  y_step = image_height / icon_height;
-  
-  x_skip = (image_width % icon_width) / 2;
-  y_skip = (image_height % icon_height) / 2;
-  
-  if (x_step == 0){
-    x_step = 1;
-    x_skip = 0;
-  }
-  if (y_step == 0){
-    y_step = 1;
-    y_skip = 0;
-  }
-  
-  for (y = 0; y < icon_height; y++)
-    for (x = 0; x < icon_width; x++)
-      *sicon++ = *(image + image_width * (y_step * y + y_skip) + x_step * x + x_skip);
-  
-}
-
-
-char *get_image_name(char *path_name)
+char *
+get_image_name(char *path_name)
 {
   char *last;
   
@@ -2115,212 +2651,173 @@ char *get_image_name(char *path_name)
   return(last);
 }
 
-
+int
 main(int argc, char *argv[])
 {
-  
-  static char *
-    window_title = NULL;
-  static int 
-    mni_data = FALSE,
-    debug = FALSE,
-    progress = TRUE,
-    minc_data = FALSE,
-    float_data = FALSE,
-    indices[] = {INDEX_MIN,INDEX_MAX},
+    static char *window_title = NULL; /* Main window title */
+    static int mni_data = FALSE;
+    static int debug = FALSE;
+    static int progress = TRUE;
+    static int float_data = FALSE;
+    static int indices[] = {INDEX_MIN,INDEX_MAX};
 #define nindices (sizeof(indices)/sizeof(indices[0]))
-    frames = 0,
-    frame = START_FRAME,
-    rframes[] = {0,0},
+    static int frames = 0;
+    static int frame = START_FRAME;
+    static int rframes[] = {0,0};
 #define nrframes (sizeof(rframes)/sizeof(rframes[0]))
-    rslices[] = {0,0},
+    static int rslices[] = {0,0};
 #define nrslices (sizeof(rframes)/sizeof(rslices[0]))
-    slices = 0,
-    slice = START_SLICE,
-    keep_foreground = FALSE,
-    use_icon = FALSE,
-    image_width = IMAGE_WIDTH,
-    image_height = IMAGE_HEIGHT,
-    roi_radius = ROI_RADIUS,
-    time_available = FALSE,
-    no_of_images = NO_OF_IMAGES;
+    static int slices = 0;
+    static int slice = START_SLICE;
+    static int image_width = IMAGE_WIDTH;
+    static int image_height = IMAGE_HEIGHT;
+    static int roi_radius = ROI_RADIUS;
+    static  int time_available = FALSE;
+    static int no_of_images = NO_OF_IMAGES;
+    static void (*present_scale)(float, float *) = 0;
   
-  static void 
-    (*present_scale)(float, float *) = 0;
+    static ArgvInfo argTable[] = {
+        { "-title", ARGV_STRING, (char *) NULL, (char *) &window_title,
+          "Window title" },
+        { "-mni", ARGV_CONSTANT, (char *) TRUE, (char *) &mni_data,
+          "File is an mni file" },
+        { "-debug", ARGV_CONSTANT, (char *) TRUE, (char *) &debug,
+          "Output minc file information" },
+        { "-noprogress", ARGV_CONSTANT, (char *) FALSE, (char *) &progress,
+          "Do not show progress during minc image input" },
+        { "-cindex", ARGV_INT, (char *) nindices, (char *) &indices,
+          "Minimum and Maximum lookup table indices" },
+        { "-frames", ARGV_INT, (char *) NULL, (char *) &frames,
+          "Number of data frames" },
+        { "-frame", ARGV_INT, (char *) NULL, (char *) &frame,
+          "Frame to be displayed" },
+        { "-rframes", ARGV_INT, (char *) nrframes, (char *) &rframes,
+          "First and last frames to be read" },
+        { "-slices", ARGV_INT, (char *) NULL, (char *) &slices,
+          "Number of data slices" },
+        { "-slice", ARGV_INT, (char *) NULL, (char *) &slice,
+          "Slice to be displayed" },
+        { "-rslices", ARGV_INT, (char *) nrslices, (char *) &rslices,
+          "First and last slices to be read" },
+        { "-width", ARGV_INT, (char *) NULL, (char *) &image_width,
+          "Image width" },
+        { "-height", ARGV_INT, (char *) NULL, (char *) &image_height,
+          "Image height" },
+        { "-roi_radius", ARGV_INT, (char *) NULL, (char *) &roi_radius,
+          "ROI Size" },
+        { "-dynamic", ARGV_CONSTANT, (char *) TRUE, (char *) &time_available,
+          "Time info available within float data" },
+        { "-images", ARGV_INT, (char *) NULL, (char *) &no_of_images,
+          "Number of images" },
+        { "-spectral", ARGV_CONSTANT, (char *) spectral, (char *) &present_scale,
+          "Use spectral scale" },
+        { "-hotmetal", ARGV_CONSTANT, (char *) hotmetal, (char *) &present_scale,
+          "Use hotmetal scale" },
+        { "-grayscale", ARGV_CONSTANT, (char *) gray, (char *) &present_scale,
+          "Use gray scale" },
+        { "-describe", ARGV_FUNC, (char *) describe_postf, (char *) NULL,
+          "Print out a description of the postf interface."},
+        { (char *) NULL, ARGV_END, (char *) NULL, (char *) NULL, (char *) NULL },
+    };
   
-  static ArgvInfo argTable[] = {
-    { "-title", ARGV_STRING, (char *) NULL, (char *) &window_title,
-        "Window title" },
-    { "-mni", ARGV_CONSTANT, (char *) TRUE, (char *) &mni_data,
-        "File is an mni file" },
-    { "-debug", ARGV_CONSTANT, (char *) TRUE, (char *) &debug,
-        "Output minc file information" },
-    { "-noprogress", ARGV_CONSTANT, (char *) FALSE, (char *) &progress,
-        "Do not show progress during minc image input" },
-    { "-cindex", ARGV_INT, (char *) nindices, (char *) &indices,
-        "Minimum and Maximum lookup table indices" },
-    { "-frames", ARGV_INT, (char *) NULL, (char *) &frames,
-        "Number of data frames" },
-    { "-frame", ARGV_INT, (char *) NULL, (char *) &frame,
-        "Frame to be displayed" },
-    { "-rframes", ARGV_INT, (char *) nrframes, (char *) &rframes,
-        "First and last frames to be read" },
-    { "-slices", ARGV_INT, (char *) NULL, (char *) &slices,
-        "Number of data slices" },
-    { "-slice", ARGV_INT, (char *) NULL, (char *) &slice,
-        "Slice to be displayed" },
-    { "-rslices", ARGV_INT, (char *) nrslices, (char *) &rslices,
-        "First and last slices to be read" },
-    { "-width", ARGV_INT, (char *) NULL, (char *) &image_width,
-        "Image width" },
-    { "-height", ARGV_INT, (char *) NULL, (char *) &image_height,
-        "Image height" },
-    { "-roi_radius", ARGV_INT, (char *) NULL, (char *) &roi_radius,
-        "ROI Size" },
-    { "-foreground", ARGV_CONSTANT, (char *) TRUE, (char *) &keep_foreground,
-        "Stay in foreground" },
-    { "-dynamic", ARGV_CONSTANT, (char *) TRUE, (char *) &time_available,
-        "Time info available within float data" },
-    { "-images", ARGV_INT, (char *) NULL, (char *) &no_of_images,
-        "Number of images" },
-    { "-spectral", ARGV_CONSTANT, (char *) spectral, (char *) &present_scale,
-        "Use spectral scale" },
-    { "-hotmetal", ARGV_CONSTANT, (char *) hotmetal, (char *) &present_scale,
-        "Use hotmetal scale" },
-    { "-grayscale", ARGV_CONSTANT, (char *) gray, (char *) &present_scale,
-        "Use gray scale" },
-    { "-icon", ARGV_CONSTANT, (char *) TRUE, (char *) &use_icon,
-        "Use special premade icon (user selected or default)" },
-    { "-describe", ARGV_FUNC, (char *) describe_postf, (char *) NULL,
-        "Print out a description of the postf interface."},
-    { (char *) NULL, ARGV_END, (char *) NULL, (char *) NULL, (char *) NULL },
-  };
+    MincInfo *MincFile;
+    int minc_data = FALSE;
+    MniInfo *MniFile;
+    char matrix_type;
+    static char default_window_title[] = "stdin";
   
-  MincInfo
-    *MincFile;
+    BOOLEAN quit;
+  
+    FILE *input_fp;
+  
+    float *frame_length;
+    float *frame_time;
+    float cterm, cfact; /* for reconverting color indices into floats */
+    float initial_zoom;
+    float zoom;
+    float low = 0.0;        /* threshold for start of scale ramping */
+    float high = 1.0;         /* threshold for end of scale ramping */
+    float min, max;             /* min and max data values */
+    float moving_color; /* color selected using mouse pointer during rescaling */
+  
+    struct postf_wind *main_window;
+    struct postf_wind *profile_window;
+    struct postf_wind *dynamic_window;
 
-  MniInfo
-    *MniFile;
+    int main_origin[XY];
+    int profile_origin[XY];
+    int profile_size[XY];
+    int dynamic_origin[XY];
+    int dynamic_size[XY];
   
-  char 
-    matrix_type;
+    int min_frame = START_FRAME;
+    int min_slice = START_SLICE;
+    int max_frame = START_FRAME;
+    int max_slice = START_SLICE;
+    int offset_to_images;       /* in blocks */
+    int frames_present = FALSE;
+    int frame_range_specified = FALSE;
+    int slice_range_specified = FALSE;
+    int main_frozen = FALSE;
+    int profile_frozen = FALSE;
+    int dynamic_frozen = FALSE;
+    int axes = XAXIS | YAXIS;   /* axes displayed in profile window */
+    int stride = 1;
+    int shiftkey_down = FALSE;
+    int ctrlkey_down = FALSE;
+    int altkey_down = FALSE;
+    int update_needed = FALSE;
+    int roi_dump = FALSE;
+    int must_redraw_main = FALSE;
+    int must_redraw_profile = FALSE;
+    int must_redraw_dynamic = FALSE;
+    int must_evaluate_pixel = FALSE;
+    int must_change_color_map = FALSE;
+    int must_write_scale = FALSE;
+    int must_syncronize_mouse = FALSE;
+    int evaluating_pixel = FALSE;
+    int moving_origin = FALSE;
+    int moving_scale = FALSE;
+    int moving_top_scale = FALSE;
+    int moving_bottom_scale = FALSE;
+    int user_slice_count = SLICES;
+    int user_frame_count = FRAMES;
+    int user_image_count = SLICES * FRAMES;
+    int *user_slice_list;
+    int *user_frame_list;
+    int image_size = IMAGE_SIZE;
+    int frames_specified = FALSE;
+    int slices_specified = FALSE;
   
-  static char
-    default_window_title[] = "stdin";
+    static int  image_subwindow[2*XY] = {0,WINDOW_WIDTH-1,0,WINDOW_HEIGHT-1};
+    static int scale_subwindow[2*XY] = {
+        WINDOW_WIDTH+COLOR_BAR_XOFFSET-LOOSE,
+        WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH+LOOSE,
+        COLOR_BAR_YOFFSET-LOOSE,
+        COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT+LOOSE
+    };
+        
+    int mouse_position[XY];
+    int evaluate_position[XY];
+    int draw_origin[XY] = {0,0};
+    int last_origin[XY];
+    int start_origin[XY];
+    int is_press;
   
-  BOOLEAN quit;
+    unsigned short *image;
+    unsigned short *clipping_buffer;
+    unsigned short *dynamic_volume;
+    unsigned short color_bar[COLOR_BAR_WIDTH*(COLOR_BAR_HEIGHT+1)];
   
-  FILE *input_fp;
-  
-  Device 
-    event;
-  
-  static Device
-    mouse[] = {MOUSEX,MOUSEY};
-  
-  float
-    *frame_length,
-    *frame_time,
-    cterm,cfact,  /* for reconverting color indices into floats */
-    initial_zoom,
-    zoom,
-    low = 0.0,    /* threshold for start of scale ramping */
-    high = 1.0,   /* threshold for end of scale ramping */
-    min, max,     /* min and max data values */
-    moving_color; /* color selected using mouse pointer during rescaling */
-  
-  long
-    main_window,
-    profile_window,
-    dynamic_window,
-    main_origin[XY],
-    profile_origin[XY],
-    profile_size[XY],
-    dynamic_origin[XY],
-    dynamic_size[XY];
-  
-  int
-    min_frame = START_FRAME,
-    min_slice = START_SLICE,
-    max_frame = START_FRAME,
-    max_slice = START_SLICE,
-    offset_to_images, /* in blocks */
-    frames_present = FALSE,
-    frame_range_specified = FALSE,
-    slice_range_specified = FALSE,
-    main_frozen = FALSE,
-    profile_frozen = FALSE,
-    profiling = FALSE,
-    dynamic_frozen = FALSE,
-    axes = XAXIS | YAXIS,
-    dynamic = FALSE,
-    stride = 1,
-    shiftkey_down = FALSE,
-    ctrlkey_down = FALSE,
-    altkey_down = FALSE,
-    update_needed = FALSE,
-    roi_dump = FALSE,
-    must_create_profile = FALSE,
-    must_create_dynamic = FALSE,
-    must_redraw_main = FALSE,
-    must_redraw_profile = FALSE,
-    must_redraw_dynamic = FALSE,
-    must_evaluate_pixel = FALSE,
-    must_change_color_map = FALSE,
-    must_write_scale = FALSE,
-    must_syncronize_mouse = FALSE,
-    drawing_new_image = FALSE,
-    evaluating_pixel = FALSE,
-    moving_origin = FALSE,
-    moving_scale = FALSE,
-    moving_top_scale = FALSE,
-    moving_bottom_scale = FALSE,
-    user_slice_count = SLICES,
-    user_frame_count = FRAMES,
-    user_image_count = SLICES * FRAMES,
-    icon_width = 85,
-    icon_height = 67,
-    icon_draw_mode = MAP_MODE,
-    *user_slice_list,
-    *user_frame_list,
-    image_size = IMAGE_SIZE,
-    frames_specified = FALSE,
-    slices_specified = FALSE;
-  
-  static short
-    image_subwindow[2*XY] = {0,WINDOW_WIDTH-1,0,WINDOW_HEIGHT-1},
-    scale_subwindow[2*XY] = {
-      WINDOW_WIDTH+COLOR_BAR_XOFFSET-LOOSE,
-      WINDOW_WIDTH+COLOR_BAR_XOFFSET+COLOR_BAR_WIDTH+LOOSE,
-      COLOR_BAR_YOFFSET-LOOSE,
-      COLOR_BAR_YOFFSET+COLOR_BAR_HEIGHT+LOOSE
-      };
-  
-  short
-    mouse_position[XY],
-    evaluate_position[XY],
-    draw_origin[XY] = {0,0},
-    last_origin[XY],
-    start_origin[XY],
-    valuator;
-  
-  unsigned short
-    *sicon,
-    *image,
-    *clipping_buffer,
-    *dynamic_volume,
-    glyph[16],
-    color_bar[COLOR_BAR_WIDTH*(COLOR_BAR_HEIGHT+1)];
-  
-  unsigned long *licon;
-  
-  char *input_fn;
+    char *input_fn;
 
-  TextColor = 1;
-  
-  if (ParseArgv(&argc, argv, argTable, 0)){
-    usage(argv[0]);
-  }
+#if DO_RESAMPLE
+    resample_function = nearestNeighbour;
+#endif /* DO_RESAMPLE */
+
+    if (ParseArgv(&argc, argv, argTable, 0)){
+        usage(argv[0]);
+    }
   
   /* 
    * Check to see if indices were changed, if so, 
@@ -2338,39 +2835,6 @@ main(int argc, char *argv[])
     }
   }
   
-  /*
-   * Read in postf.defauts file for runtime global variable settings
-   */
-  
-  {
-    
-    char globals_filename[] = "postf.defaults";
-    char homepath[MAX_STRING_LENGTH];
-    char libpath[MAX_STRING_LENGTH];
-    
-    sprintf(libpath,"/usr/local/mni/lib/%s", globals_filename);
-    sprintf(homepath,"%s/.%s", getenv("HOME"), globals_filename);
-    
-    if (file_exists(libpath)){
-      input_globals_file(SIZEOF_STATIC_ARRAY(globals_list),
-                         globals_list,
-                         libpath);
-    }
-    
-    if (file_exists(homepath)){
-      input_globals_file(SIZEOF_STATIC_ARRAY(globals_list),
-                         globals_list,
-                         homepath);
-    }
-    
-    if (file_exists(globals_filename)){
-      input_globals_file(SIZEOF_STATIC_ARRAY(globals_list),
-                         globals_list,
-                         globals_filename);
-    }
-    
-  }
-
   if (frames != 0) frames_specified = TRUE; else frames = FRAMES;
   if (slices != 0) slices_specified = TRUE; else slices = SLICES;
 
@@ -2418,7 +2882,8 @@ main(int argc, char *argv[])
 
       no_of_images = slices * frames;
       
-    }else{
+    }
+    else{
       
       usage(argv[0]);
       
@@ -2435,8 +2900,9 @@ main(int argc, char *argv[])
     if (frames != FRAMES || slices != SLICES){
       if (no_of_images == NO_OF_IMAGES){
         no_of_images = slices * frames;
-      }else if (no_of_images != slices * frames){
-        (void) fprintf(stderr,"%s: # of images != slices * frames\n", argv[0]);
+      }
+      else if (no_of_images != slices * frames){
+        fprintf(stderr,"%s: # of images != slices * frames\n", argv[0]);
         usage(argv[0]);
       }	 
     }
@@ -2455,7 +2921,8 @@ main(int argc, char *argv[])
   
   if (rframes[1] != 0) {
     frame_range_specified = TRUE;
-  }else{
+  }
+  else{
     rframes[0] = 1;
     rframes[1] = frames;
   }
@@ -2471,7 +2938,8 @@ main(int argc, char *argv[])
   
   if (rslices[1] != 0) {
     slice_range_specified = TRUE;
-  }else{
+  }
+  else{
     rslices[0] = 1;
     rslices[1] = slices;
   }
@@ -2493,7 +2961,7 @@ main(int argc, char *argv[])
   if ((dynamic_volume = 
        (unsigned short *)malloc(sizeof(unsigned short)*image_size*user_image_count))
       == NULL){
-    (void) fprintf(stderr,"%s: NOT ENOUGH MEMORY AVAILABLE\n",argv[0]);
+    fprintf(stderr,"%s: NOT ENOUGH MEMORY AVAILABLE\n",argv[0]);
     exit(ERROR_STATUS);
   }
 
@@ -2543,7 +3011,8 @@ main(int argc, char *argv[])
                   progress,
                   debug);
 
-  }else{
+  }
+  else{
     
     input_fp = stdin;
     read_float_data(input_fp,
@@ -2570,12 +3039,12 @@ main(int argc, char *argv[])
   if (frame != START_FRAME) frame--;
   
   if (slice >= user_slice_count || slice < 0){
-    (void) fprintf(stderr,"%s: chosen slice (%d) > # of slices (%d)\n",
+    fprintf(stderr,"%s: chosen slice (%d) > # of slices (%d)\n",
                    argv[0],slice+1,slices);
     usage(argv[0]);
   }
   if(frame >= user_frame_count || frame < 0){
-    (void) fprintf(stderr,"%s: chosen frame (%d) > # of frames (%d)\n", 
+    fprintf(stderr,"%s: chosen frame (%d) > # of frames (%d)\n", 
                    argv[0],frame+1,frames);
     usage(argv[0]);
   }
@@ -2583,733 +3052,791 @@ main(int argc, char *argv[])
   calculate_conversions(min,max,&cfact,&cterm);
   
   /* 
-   *  (void) fprintf(stderr, "      Number of slices: %d\n", slices);
-   *  (void) fprintf(stderr, "      Number of frames: %d\n", frames);
-   *  (void) fprintf(stderr, "Total number of images: %d\n", no_of_images);
-   *  (void) fprintf(stderr, "            Volume min: %f\n", min);
-   *  (void) fprintf(stderr, "            Volume max: %f\n", max);   
-   *  (void) fprintf(stderr, "Conversion constants: %f and %f\n",cfact,cterm);
+   *  fprintf(stderr, "      Number of slices: %d\n", slices);
+   *  fprintf(stderr, "      Number of frames: %d\n", frames);
+   *  fprintf(stderr, "Total number of images: %d\n", no_of_images);
+   *  fprintf(stderr, "            Volume min: %f\n", min);
+   *  fprintf(stderr, "            Volume max: %f\n", max);   
+   *  fprintf(stderr, "Conversion constants: %f and %f\n",cfact,cterm);
    */
-  
-  if (use_icon){
-    char
-      *icon_file,
-      default_icon[] = "/usr/people/gaby/csrc/post.ico";
-    
-    if ((icon_file = getenv("POST_ICON")) == NULL) icon_file = default_icon;
-    
-    if (file_exists(icon_file)){
-      
-      sizeofimage(icon_file,&icon_width,&icon_height);
-      licon = (unsigned long *)longimagedata(icon_file);
-      icon_draw_mode = TRUE_COLOR_MODE;
-      
-    } else {
-      
-      sicon = (unsigned short *)malloc(sizeof(unsigned short)*icon_width*icon_height);
-      
-    }
-    
-  } else {
-    
-    sicon = (unsigned short *)malloc(sizeof(unsigned short)*icon_width*icon_height);
-    
-  }
-  
-  iconsize(icon_width,icon_height);
   
   /* if (debug) exit(NORMAL_STATUS); */
   
-  initialize_gl_fonts();
-  
   if (window_title == NULL) window_title = default_window_title;
-  prefsize((long)(WINDOW_WIDTH+COLOR_BAR_WINDOW),(long)WINDOW_HEIGHT);
-  
-  if (keep_foreground) foreground();
-  
-  main_window = winopen(window_title);
-  set_overlay();
-  doublebuffer(); gconfig();
-  
-  if (present_scale == 0) present_scale = spectral;
-  change_color_map(present_scale,low,high);
-  getorigin(&main_origin[X],&main_origin[Y]);
+
+  xinit();
+
+  main_window = create_basic_window(window_title, 
+                                    WINDOW_WIDTH+COLOR_BAR_WINDOW,
+                                    WINDOW_HEIGHT);
+
+  if (present_scale == 0) {
+      present_scale = spectral;
+  }
+  change_color_map(present_scale, low, high);
   make_color_bar(color_bar);
+
+  XSetForeground(_xDisplay, main_window->gc, ImageBackgroundColor);
+  XFillRectangle(_xDisplay, main_window->draw, main_window->gc, 0, 0, 
+                 WINDOW_WIDTH+COLOR_BAR_WINDOW, WINDOW_HEIGHT);
   
   initial_zoom = zoom = (float)MIN(WINDOW_WIDTH/image_width,WINDOW_HEIGHT/image_height);
   image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
   clipping_buffer = malloc(sizeof(*clipping_buffer) * image_size);
-  draw_axes(0,MAX(image_width,image_height),min,max,NIL,NIL,NIL,NIL,NIL,PROFILE,INITIALIZE);
-  draw_axes(frame_time[0],frame_time[user_frame_count-1],
+  draw_axes(NULL, 0, MAX(image_width, image_height), min, max,
+            NIL,NIL,NIL,NIL,NIL,PROFILE,INITIALIZE);
+  draw_axes(NULL, frame_time[0], frame_time[user_frame_count-1],
             min,max,NIL,NIL,NIL,NIL,NIL,DYNAMIC,INITIALIZE);
   
-  draw_profile(NIL,dynamic_volume,image_width,image_height,NIL,NIL,NIL,cfact,cterm,
-               user_frame_count,user_slice_count,NIL,NIL,NIL,INITIALIZE,NOT_REDRAW_ONLY);
-  draw_dynamic(dynamic_volume,frame_time,user_frame_count,NIL,NIL,NIL,NIL,image_width,
-               image_height,NIL,cfact,cterm,roi_radius,INITIALIZE,NOT_REDRAW_ONLY,roi_dump);
-  draw_new_slice(draw_origin,frame,slice,*rframes,*rslices,image_width,image_height,
-                 min,max,low,high,image,clipping_buffer,zoom,color_bar,NOT_REDRAW_ONLY);
+  draw_profile(NULL,
+               NIL,
+               dynamic_volume,
+               image_width,
+               image_height,
+               NIL,NIL,NIL,
+               cfact,
+               cterm,
+               user_frame_count,
+               user_slice_count,
+               NIL,NIL,NIL,
+               INITIALIZE,
+               NOT_REDRAW_ONLY);
+
+  draw_dynamic(NULL,
+               dynamic_volume,
+               frame_time,
+               user_frame_count,NIL,NIL,NIL,NIL,
+               image_width,
+               image_height,
+               NIL,
+               cfact,
+               cterm,
+               roi_radius,
+               INITIALIZE,NOT_REDRAW_ONLY,
+               roi_dump);
+
+  draw_new_slice(main_window, 
+                 draw_origin,
+                 frame,
+                 slice,
+                 *rframes,
+                 *rslices,
+                 image_width,
+                 image_height,
+                 min,
+                 max,
+                 low,
+                 high,
+                 image,
+                 clipping_buffer,
+                 zoom,
+                 color_bar,
+                 NOT_REDRAW_ONLY);
   
-  noise(MOUSEX,4);
-  noise(MOUSEY,4);
-  
-  qdevice(DKEY);
-  qdevice(GKEY);
-  qdevice(HKEY);
-  qdevice(MKEY);
-  qdevice(PKEY);
-  qdevice(QKEY);
-  qdevice(RKEY);
-  qdevice(SKEY);
-  qdevice(TKEY);
-  qdevice(XKEY);
-  qdevice(YKEY);
-  qdevice(ZKEY);
-  qdevice(ESCKEY);
-  qdevice(SPACEKEY);
-  qdevice(MINUSKEY);
-  qdevice(EQUALKEY);
-  /* qdevice(WINSHUT); */
-  qdevice(WINQUIT);
-  qdevice(MOUSEX);
-  qdevice(MOUSEY);
-  qdevice(LEFTARROWKEY);
-  qdevice(RIGHTARROWKEY);
-  qdevice(UPARROWKEY);
-  qdevice(DOWNARROWKEY);
-  qdevice(LEFTSHIFTKEY);
-  qdevice(RIGHTSHIFTKEY);
-  qdevice(LEFTCTRLKEY);
-  qdevice(RIGHTCTRLKEY);
-  qdevice(LEFTALTKEY);
-  qdevice(RIGHTALTKEY);
-  qdevice(LEFTMOUSE);
-  qdevice(MIDDLEMOUSE);
-  qdevice(RIGHTMOUSE);
-  /* qdevice(WINTHAW); */
-  /* qdevice(WINFREEZE); */
-  /* qdevice(REDRAWICONIC); */
-  
-  getdev(2,mouse,mouse_position);
-  mouse_position[X] -= main_origin[X];
-  mouse_position[Y] -= main_origin[Y];
-  
+
+  get_mouse_ptr(main_window, mouse_position);
+
+  XSelectInput(_xDisplay, main_window->wind, POSTF_X_EVENT_MASK);
   quit = FALSE;
   while (!quit){
-    
-    if (!qtest()){
-      
-      if (must_create_profile){
-        must_create_profile = FALSE;
-        iconsize(icon_width,icon_height);
-        profile_window = create_window(window_title,0,MAX(image_width,image_height),min,
-                                       max,axes,PROFILE,profile_origin,profile_size);
-        winset(main_window);
-      }
-      
-      if (must_create_dynamic){
-        must_create_dynamic = FALSE;
-        iconsize(icon_width,icon_height);
-        dynamic_window = create_window(window_title,frame_time[0],
-                                       frame_time[user_frame_count-1],
-                                       min,max,axes,DYNAMIC,
-                                       dynamic_origin,dynamic_size);
-        winset(main_window);
-      }
-      
-      if (must_redraw_main){
-        must_redraw_main = FALSE;
-        draw_new_slice(draw_origin,frame,slice,*rframes,*rslices,image_width,image_height,
-                       min,max,low,high,image,clipping_buffer,zoom,color_bar,NOT_REDRAW_ONLY);
-      }
-      
-      if (must_redraw_profile){
-        must_redraw_profile = FALSE;
-        winset(profile_window);
-        getorigin(&profile_origin[X],&profile_origin[Y]);
-        getsize(&profile_size[X],&profile_size[Y]);
-        viewport((Screencoord)0,(Screencoord)profile_size[X],
-                 (Screencoord)0,(Screencoord)profile_size[Y]);
-        draw_profile(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                     NIL,NIL,axes,NOT_INITIALIZE,REDRAW_ONLY);
-        winset(main_window);
-      }
-      
-      if (must_redraw_dynamic){
-        must_redraw_dynamic = FALSE;
-        winset(dynamic_window);
-        getorigin(&dynamic_origin[X],&dynamic_origin[Y]);
-        getsize(&dynamic_size[X],&dynamic_size[Y]);
-        viewport((Screencoord)0,(Screencoord)dynamic_size[X],
-                 (Screencoord)0,(Screencoord)dynamic_size[Y]);
-        draw_dynamic(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                     NIL,NIL,NOT_INITIALIZE,REDRAW_ONLY,roi_dump);
-        winset(main_window);
-      }
-      
-      if (must_evaluate_pixel){
-        must_evaluate_pixel = FALSE;
-        if (evaluating_pixel) draw_cursor(mouse_position, roi_radius * zoom);
-        evaluate_position[X] = (mouse_position[X] - draw_origin[X])/zoom;
-        evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y])/zoom;
-        evaluate_pixel(evaluate_position,image,frame,slice,cfact,cterm,image_width,
-                       image_height,image_size,roi_radius,profiling,profile_frozen,
-                       dynamic,dynamic_frozen,axes,main_window,
-                       profile_window,dynamic_window,roi_dump);
-        if (roi_dump) roi_dump = FALSE;
-      }
-      if (must_change_color_map){
-        must_change_color_map = FALSE;
-        change_color_map(present_scale,low,high);
-        qenter(REDRAW, main_window);
-      }
-      
-      if (must_write_scale){
-        must_write_scale = FALSE;
-        frontbuffer(TRUE);
-        write_scale(low,high,frame,slice,*rframes,*rslices);
-        frontbuffer(FALSE);
-      }
-      
-      if (drawing_new_image){
-        drawing_new_image = FALSE;
-      }
-    }
-    
-    event=qread(&valuator);
-    if (main_frozen && 
-        /* event != REDRAWICONIC &&  */
-        event != WINTHAW && 
-        event != WINQUIT /* && 
-                            event != WINSHUT */
-        ) continue;
-    
-    switch(event){
-      
-    case WINTHAW:
-      if (valuator == main_window){
-        main_frozen = FALSE;
-        if (profile_frozen) profile_frozen = FALSE;
-        if (dynamic_frozen) dynamic_frozen = FALSE;
-        if (icon_draw_mode == TRUE_COLOR_MODE) {
-          cmode(); 
-          gconfig();
-        }
-        must_redraw_main = TRUE;
-        if (profiling) must_create_profile = TRUE;
-        if (dynamic) must_create_dynamic = TRUE;
-      }else if (valuator == profile_window){
-        profile_frozen = FALSE;
-        winset(profile_window);
-        if (icon_draw_mode == TRUE_COLOR_MODE) {
-          cmode(); 
-          gconfig();
-        }
-        draw_profile(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                     NIL,NIL,NIL,axes,NOT_INITIALIZE,REDRAW_ONLY);
-        winset(main_window);
-      }else if (valuator == dynamic_window){
-        dynamic_frozen = FALSE;
-        winset(dynamic_window);
-        if (icon_draw_mode == TRUE_COLOR_MODE) {
-          cmode(); 
-          gconfig();
-        }
-        draw_dynamic(NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
-                     NIL,NIL,NOT_INITIALIZE,REDRAW_ONLY,roi_dump);
-        winset(main_window);
-      }
-      break;
-      
-    case REDRAW:
-      if (valuator == main_window){
-        getorigin(&main_origin[X],&main_origin[Y]);
-        must_redraw_main = TRUE;
-      }
-      else if (profiling && valuator == profile_window) must_redraw_profile = TRUE;
-      else if (dynamic && valuator == dynamic_window) must_redraw_dynamic = TRUE;
-      break;
-      
-    case DKEY:
-      if (user_frame_count > 1 && valuator && !dynamic) must_create_dynamic = dynamic = TRUE;
-      else if(valuator && dynamic && !dynamic_frozen){
-        destroy_window(dynamic_window);
-        winset(main_window);
-        dynamic = FALSE;
-      }
-      break;
-      
-    case GKEY:
-      if (valuator){
-        present_scale = gray;
-        must_change_color_map = TRUE;
-      }
-      break;
-      
-    case HKEY:
-      if (valuator){
-        present_scale = hotmetal;
-        must_change_color_map = TRUE;
-      }
-      break;
-      
-    case MKEY:
-      if (valuator){
-        if (shiftkey_down){
-          frame = max_frame;
-          slice = max_slice;
-        }else{
-          frame = min_frame;
-          slice = min_slice;
-        }
-        image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-        must_redraw_main = TRUE;
-      }
-      break;
-      
-    case PKEY:
-      if (valuator && !profiling){
-        must_create_profile = TRUE;
-        profiling = TRUE;
-      }else if(valuator && profiling && !profile_frozen){
-        destroy_window(profile_window);
-        winset(main_window);
-        profiling = FALSE;
-      }
-      break;
-      
-    case RKEY:
-      if (valuator){
-        if (shiftkey_down){
-          zoom = initial_zoom;
-          draw_origin[X] = last_origin[X] = 0;
-          draw_origin[Y] = last_origin[Y] = 0;	       
-          must_redraw_main = TRUE;
-        }else{    
-          low = 0.0; high = 1.0;
-          must_change_color_map = TRUE;
-          must_write_scale = TRUE;	
-        }
-      }
-      break;
-      
-    case SKEY:
-      if (valuator){
-        present_scale = spectral;
-        must_change_color_map = TRUE;
-      }
-      break;
-      
-    case TKEY:
-      break;
-      
-    case XKEY:
-      if (valuator) axes ^= XAXIS;
-      break;
-      
-    case YKEY:
-      if (valuator) axes ^= YAXIS;
-      break;
-      
-    case ZKEY:
-      if (valuator) axes ^= ZAXIS;
-      break;
-      
-    case MINUSKEY:
-      if (valuator && !shiftkey_down && in_subwindow(mouse_position,image_subwindow))
-        if (zoom >= 2.0){
-          evaluate_position[X] = (mouse_position[X] - draw_origin[X]) / zoom;
-          evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y]) / zoom;
-          zoom--;
-          last_origin[X] = draw_origin[X] = mouse_position[X] - zoom * evaluate_position[X];
-          last_origin[Y] = draw_origin[Y] = mouse_position[Y] - zoom * evaluate_position[Y];
-          must_redraw_main = TRUE;
-        }
-      break;
-      
-    case EQUALKEY:
-      if (valuator && shiftkey_down && in_subwindow(mouse_position,image_subwindow)){
-        evaluate_position[X] = (mouse_position[X] - draw_origin[X]) / zoom;
-        evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y]) / zoom;
-        zoom++;
-        last_origin[X] = draw_origin[X] = mouse_position[X] - zoom * evaluate_position[X];
-        last_origin[Y] = draw_origin[Y] = mouse_position[Y] - zoom * evaluate_position[Y];
-        must_redraw_main = TRUE;
-      }
-      break;
-      
-    case MOUSEX:
-      mouse_position[X] = valuator - main_origin[X];
-      break;
-      
-    case MOUSEY:
-      mouse_position[Y] = valuator - main_origin[Y];
-      if(evaluating_pixel){
-        must_evaluate_pixel = TRUE;
-      }else if(moving_origin){
-        draw_origin[X] = last_origin[X] + (mouse_position[X] - start_origin[X]);
-        draw_origin[Y] = last_origin[Y] + (mouse_position[Y] - start_origin[Y]);
-        must_redraw_main = TRUE;
-      }else if (moving_scale){
-        translate_scale(mouse_position[Y],&low,&high,moving_color);
-        must_change_color_map = TRUE;
-        must_write_scale = TRUE;
-      }else if (moving_bottom_scale){
-        new_scale_slope(mouse_position[Y],&low,&high,TOP,moving_color);
-        must_change_color_map = TRUE;
-        must_write_scale = TRUE;
-      }else if (moving_top_scale){
-        new_scale_slope(mouse_position[Y],&low,&high,BOTTOM,moving_color);
-        must_change_color_map = TRUE;
-        must_write_scale = TRUE;
-      }
-      break;
-      
-    case LEFTMOUSE:
-      if (valuator){
-        if (in_subwindow(mouse_position,scale_subwindow)){
-          moving_color = get_color(mouse_position[Y], low, high);
-          moving_top_scale = TRUE;
-        }else if (in_subwindow(mouse_position,image_subwindow) && !altkey_down){
-          curstype(C16X1);
-          defcursor(1,glyph);
-          setcursor(1,0,0);
-          evaluating_pixel = TRUE;
-          must_evaluate_pixel = TRUE;
-        }
-      }else{
-        if (moving_top_scale) moving_top_scale = FALSE;
-        if (evaluating_pixel){
-          erase_cursor();
-          setcursor(0,0,0);
-          evaluating_pixel = FALSE;
-          must_evaluate_pixel = FALSE;
-        }
-      }
-      break;
-      
-    case MIDDLEMOUSE:
-      if (valuator){
-        if (in_subwindow(mouse_position,scale_subwindow)){
-          moving_color = get_color(mouse_position[Y], low, high);
-          moving_scale = TRUE;
-        }else if (in_subwindow(mouse_position,image_subwindow)){
-          start_origin[X] = mouse_position[X];
-          start_origin[Y] = mouse_position[Y];
-          moving_origin = TRUE;
-        }
-      }else{
-        if (moving_scale) moving_scale = FALSE;
-        if (moving_origin){
-          moving_origin = FALSE;
-          last_origin[X] = draw_origin[X];
-          last_origin[Y] = draw_origin[Y];
-        }
-      }
-      break;
-      
-    case RIGHTMOUSE:
-      if (valuator){
-        if (in_subwindow(mouse_position,scale_subwindow)){
-          moving_color = get_color(mouse_position[Y], low, high);
-          moving_bottom_scale = TRUE;
-        }else if (evaluating_pixel && dynamic){
-          must_evaluate_pixel = TRUE;
-          roi_dump = TRUE;
-        }
-      }else{
-        if (moving_bottom_scale) moving_bottom_scale = FALSE;
-      }
-      break;
-      
-    case SPACEKEY:
-      if (valuator && evaluating_pixel && dynamic){
-        must_evaluate_pixel = TRUE;
-        roi_dump = TRUE;
-      }
-      break;
-      
-    case RIGHTARROWKEY:
-      if (valuator){
-        if (ctrlkey_down){
-          mouse_position[X] += stride * zoom;
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }else{
-            mouse_position[X] -= stride * zoom;
-          }
-        }else if (altkey_down){
-          roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
-          draw_cursor(mouse_position, roi_radius * zoom);
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }
-        }else{
-          frame++;
-          if (frame == user_frame_count) frame = 0;
-          if (!shiftkey_down){
-            image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-            must_redraw_main = TRUE;		  
-            if (in_subwindow(mouse_position,image_subwindow)){
-              must_evaluate_pixel = TRUE;
-            }
-          }else{
-            update_needed = TRUE;
-            must_write_scale = TRUE;
-          }
-        }
-      }
-      break;
-      
-    case LEFTARROWKEY:
-      if (valuator){
-        if (ctrlkey_down){
-          mouse_position[X] -= stride * zoom;
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }else{
-            mouse_position[X] += stride * zoom;
-          }
-        }else if (altkey_down){
-          roi_radius = MAX(0,roi_radius-1);
-          draw_cursor(mouse_position, roi_radius * zoom);
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }
-        }else{
-          frame--;
-          if (frame < 0) frame = user_frame_count-1;
-          if (!shiftkey_down){
-            image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-            must_redraw_main = TRUE;
-            if (in_subwindow(mouse_position,image_subwindow)){
-              must_evaluate_pixel = TRUE;
-            }
-          }else{
-            update_needed = TRUE;
-            must_write_scale = TRUE;
-          }
-        }
-      }
-      break;
-      
-    case DOWNARROWKEY:
-      if (valuator){
-        if (ctrlkey_down){
-          mouse_position[Y] -= stride * zoom;
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }else{
-            mouse_position[Y] += stride * zoom;
-          }
-        }else if (altkey_down){
-          roi_radius = MAX(0,roi_radius-1);
-          must_redraw_main = TRUE;
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }
-        }else{
-          slice--;
-          if (slice < 0) slice = user_slice_count-1;
-          if (!shiftkey_down){
-            image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-            must_redraw_main = TRUE;
-            if (in_subwindow(mouse_position,image_subwindow)){
-              must_evaluate_pixel = TRUE;
-            }
-          }else{
-            update_needed = TRUE;
-            must_write_scale = TRUE;
-          }
-        }
-      }
-      break;
-      
-    case UPARROWKEY:
-      if (valuator){
-        if (ctrlkey_down){
-          mouse_position[Y] += stride * zoom;
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }else{
-            mouse_position[Y] -= stride * zoom;
-          }
-        }else if (altkey_down){
-          roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
-          draw_cursor(mouse_position, roi_radius * zoom);
-          if (in_subwindow(mouse_position,image_subwindow)){
-            must_evaluate_pixel = TRUE;
-          }
-        }else{
-          slice++;
-          if (slice == user_slice_count) slice = 0;
-          if (!shiftkey_down){
-            image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-            must_redraw_main = TRUE;
-            if (in_subwindow(mouse_position,image_subwindow)){
-              must_evaluate_pixel = TRUE;
-            }
-          }
-          else{
-            update_needed = TRUE;
-            must_write_scale = TRUE;
-          }
-        }
-      }
-      break;
-      
-    case LEFTSHIFTKEY:
-    case RIGHTSHIFTKEY:
-      if (valuator){
-        shiftkey_down = TRUE;
-        if (ctrlkey_down) stride = 4;
-      }else{
-        shiftkey_down = FALSE;
-        if (ctrlkey_down) stride = 1;
-        if (update_needed){
-          update_needed = FALSE;
-          image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
-          must_redraw_main = TRUE;
-          must_write_scale = TRUE;
-        }
-      }
-      break;
-      
-    case LEFTCTRLKEY:
-    case RIGHTCTRLKEY:
-      if (valuator && !ctrlkey_down){
-        ctrlkey_down = TRUE;
-        if (shiftkey_down) stride = 4;
-        if (in_subwindow(mouse_position,image_subwindow)){
-          curstype(C16X1);
-          defcursor(1,glyph);
-          setcursor(1,0,0);
-          draw_cursor(mouse_position, roi_radius * zoom);
-          evaluating_pixel = TRUE;
-        }
-      }else if (!valuator && ctrlkey_down){
-        ctrlkey_down = FALSE;
-        if (shiftkey_down) stride = 1;
-        if (!altkey_down){
-          must_syncronize_mouse = FALSE;
-          getdev(2,mouse,mouse_position);
-          mouse_position[X] -= main_origin[X];
-          mouse_position[Y] -= main_origin[Y];
-          erase_cursor();
-          setcursor(0,0,0);
-          evaluating_pixel = FALSE;
-        }else{
-          must_syncronize_mouse = TRUE;
-        }
-      }
-      break;
-      
-    case LEFTALTKEY:
-    case RIGHTALTKEY:
-      if (valuator && !altkey_down && !evaluating_pixel){
-        altkey_down = TRUE;
-        if (in_subwindow(mouse_position,image_subwindow)){
-          curstype(C16X1);
-          defcursor(1,glyph);
-          setcursor(1,0,0);
-          draw_cursor(mouse_position, roi_radius * zoom);
-          evaluating_pixel = TRUE;
-        }
-      }else if (!valuator && altkey_down){
-        altkey_down = FALSE;
-        if (!ctrlkey_down) {
-          if (must_syncronize_mouse){
-            must_syncronize_mouse = FALSE;
-            getdev(2,mouse,mouse_position);
-            mouse_position[X] -= main_origin[X];
-            mouse_position[Y] -= main_origin[Y];
-          }
-          erase_cursor();
-          setcursor(0,0,0);
-          evaluating_pixel = FALSE;
-        }
-      }
-      break;
-      
-    case WINFREEZE:
-      if (valuator == main_window){
-        main_frozen = TRUE;
-        if (profiling){
-          destroy_window(profile_window);
-          winset(main_window);
-        }
-        if (dynamic){
-          destroy_window(dynamic_window);
-          winset(main_window);
-        }
-      }else if (valuator == profile_window){
-        profile_frozen = TRUE;
-        winset(profile_window);
-      }else if (valuator == dynamic_window){
-        dynamic_frozen = TRUE;
-        winset(dynamic_window);
-        
-      }
-      if (icon_draw_mode == TRUE_COLOR_MODE) {
-        RGBmode();
-        gconfig();
-      }else{
-        make_map_mode_icon(image,sicon,image_width,image_height,icon_width,icon_height);
-      }
-      
-      /* FALL THROUGH */
+      XEvent event;
+      XNextEvent(_xDisplay, &event);
 
-#if 0      
-    case REDRAWICONIC:
+      switch (event.type) {
+      case Expose:
+          if (event.xexpose.count == 0) {
+              if (main_window != NULL && 
+                  event.xexpose.window == main_window->wind) {
+                  must_redraw_main = TRUE;
+              }
+              else if (profile_window != NULL && 
+                       event.xexpose.window == profile_window->wind) {
+                  must_redraw_profile = TRUE;
+              }
+              else if (dynamic_window != NULL && 
+                       event.xexpose.window == dynamic_window->wind) {
+                  must_redraw_dynamic = TRUE;
+              }
+          }
+          break;
+
+      case MapNotify:
+          printf("MapNotify\n");
+          break;
+
+      case ReparentNotify:
+          printf("ReparentNotify\n");
+          break;
+
+      case ConfigureNotify:
+          printf("ConfigureNotify\n");
+          main_window->vh = event.xconfigure.height;
+          main_window->vw = event.xconfigure.width;
+          break;
+
+      case ButtonPress:
+      case ButtonRelease:
+          shiftkey_down = (event.xbutton.state & ShiftMask);
+          ctrlkey_down = (event.xbutton.state & ControlMask);
+          altkey_down = (event.xbutton.state & Mod1Mask);
+          is_press = (event.xbutton.type == ButtonPress);
+          switch (event.xbutton.button) {
+          case Button1:
+              if (is_press) {
+                  if (in_subwindow(mouse_position,scale_subwindow)) {
+                      moving_color = get_color(mouse_position[Y], low, high);
+                      moving_top_scale = TRUE;
+                  }
+                  else if (in_subwindow(mouse_position, image_subwindow) && 
+                           !altkey_down) {
+#if 0
+                      curstype(C16X1);
+                      defcursor(1,glyph);
+                      setcursor(1,0,0);
 #endif
-      if (valuator == profile_window) winset(profile_window);
-      if (valuator == dynamic_window) winset(dynamic_window);
-      frontbuffer(TRUE);
-      if (icon_draw_mode == TRUE_COLOR_MODE){
-        lrectwrite((Screencoord)0,
-                   (Screencoord)0,
-                   (Screencoord)icon_width-1,
-                   (Screencoord)icon_height-1,
-                   licon);
-      }else{
-        rectwrite((Screencoord)0,
-                  (Screencoord)0,
-                  (Screencoord)icon_width-1,
-                  (Screencoord)icon_height-1,
-                  sicon);
-      }
-      frontbuffer(FALSE);
-      if (valuator != main_window) winset(main_window);
-      break;
+                      evaluating_pixel = TRUE;
+                      must_evaluate_pixel = TRUE;
+                  }
+              }
+              else{
+                  if (moving_top_scale) 
+                      moving_top_scale = FALSE;
+                  if (evaluating_pixel) {
+                      erase_cursor(main_window);
+#if 0
+                      setcursor(0,0,0);
+#endif
+                      evaluating_pixel = FALSE;
+                      must_evaluate_pixel = FALSE;
+                  }
+              }
+              break;
+
+          case Button2:
+              if (is_press) {
+                  if (in_subwindow(mouse_position,scale_subwindow)) {
+                      moving_color = get_color(mouse_position[Y], low, high);
+                      moving_scale = TRUE;
+                  }
+                  else if (in_subwindow(mouse_position,image_subwindow)) {
+                      start_origin[X] = mouse_position[X];
+                      start_origin[Y] = mouse_position[Y];
+                      moving_origin = TRUE;
+                  }
+              }
+              else{
+                  if (moving_scale)
+                      moving_scale = FALSE;
+                  if (moving_origin) {
+                      moving_origin = FALSE;
+                      last_origin[X] = draw_origin[X];
+                      last_origin[Y] = draw_origin[Y];
+                  }
+              }
+              break;
       
-      /* case WINSHUT: */
-    case WINQUIT:
-      if (valuator == profile_window){
-        destroy_window(profile_window);
-        winset(main_window);
-        profiling = FALSE;
-      }else if (valuator == dynamic_window){
-        destroy_window(dynamic_window);
-        winset(main_window);
-        dynamic = FALSE;
-      }else quit = TRUE;
-      break;
+          case Button3:
+              if (is_press) {
+                  if (in_subwindow(mouse_position,scale_subwindow)) {
+                      moving_color = get_color(mouse_position[Y], low, high);
+                      moving_bottom_scale = TRUE;
+                  }
+                  else if (evaluating_pixel && dynamic_window != NULL){
+                      must_evaluate_pixel = TRUE;
+                      roi_dump = TRUE;
+                  }
+              }
+              else {
+                  if (moving_bottom_scale) {
+                      moving_bottom_scale = FALSE;
+                  }
+              }
+              break;
+          default:
+              fprintf(stderr, "Unknown mouse button %d\n", event.xbutton.button);
+              break;
+          }
+          break;
+
+      case KeyPress:
+      case KeyRelease:
+          {
+#define MAX_MAPPED_STRING_LENGTH 10
+              int buffersize = MAX_MAPPED_STRING_LENGTH;
+              int charcount;
+              char buffer[MAX_MAPPED_STRING_LENGTH];
+              KeySym keysym;
+              XComposeStatus compose;
+        
+              charcount = XLookupString (&event.xkey,
+                                         buffer,
+                                         buffersize,
+                                         &keysym,
+                                         &compose);
+
+              is_press = (event.xkey.type == KeyPress);
+              shiftkey_down = (event.xkey.state & ShiftMask);
+              ctrlkey_down = (event.xkey.state & ControlMask);
+              altkey_down = (event.xkey.state & Mod1Mask);
+
+              switch (keysym) {
+
+              case XK_Up:
+                  if (!is_press) {
+                      break;
+                  }
+                  if (ctrlkey_down) {
+                      mouse_position[Y] += stride * zoom;
+                      if (in_subwindow(mouse_position,image_subwindow)) {
+                          must_evaluate_pixel = TRUE;
+                      }
+                      else {
+                          mouse_position[Y] -= stride * zoom;
+                      }
+                  }
+                  else if (altkey_down) {
+                      roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
+                      draw_cursor(main_window, mouse_position, roi_radius * zoom);
+                      if (in_subwindow(mouse_position,image_subwindow)){
+                          must_evaluate_pixel = TRUE;
+                      }
+                  }
+                  else {
+                      slice++;
+                      if (slice == user_slice_count) slice = 0;
+                      if (!shiftkey_down){
+                          image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                          must_redraw_main = TRUE;
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                      }
+                      else{
+                          update_needed = TRUE;
+                          must_write_scale = TRUE;
+                      }
+                  }
+                  break;
+
+              case XK_Right:
+                  if (is_press){
+                      if (ctrlkey_down){
+                          mouse_position[X] += stride * zoom;
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                          else{
+                              mouse_position[X] -= stride * zoom;
+                          }
+                      }
+                      else if (altkey_down){
+                          roi_radius = MIN(MAX_ROI_RADIUS,roi_radius+1);
+                          draw_cursor(main_window, mouse_position, roi_radius * zoom);
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                      }
+                      else{
+                          frame++;
+                          if (frame == user_frame_count) frame = 0;
+                          if (!shiftkey_down){
+                              image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                              must_redraw_main = TRUE;		  
+                              if (in_subwindow(mouse_position,image_subwindow)){
+                                  must_evaluate_pixel = TRUE;
+                              }
+                          }
+                          else{
+                              update_needed = TRUE;
+                              must_write_scale = TRUE;
+                          }
+                      }
+                  }
+                  break;
+
+              case XK_Down:
+                  if (is_press){
+                      if (ctrlkey_down){
+                          mouse_position[Y] -= stride * zoom;
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                          else{
+                              mouse_position[Y] += stride * zoom;
+                          }
+                      }
+                      else if (altkey_down){
+                          roi_radius = MAX(0,roi_radius-1);
+                          must_redraw_main = TRUE;
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                      }
+                      else{
+                          slice--;
+                          if (slice < 0) slice = user_slice_count-1;
+                          if (!shiftkey_down){
+                              image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                              must_redraw_main = TRUE;
+                              if (in_subwindow(mouse_position,image_subwindow)){
+                                  must_evaluate_pixel = TRUE;
+                              }
+                          }
+                          else{
+                              update_needed = TRUE;
+                              must_write_scale = TRUE;
+                          }
+                      }
+                  }
+                  break;
+            
+              case XK_Left:
+                  if (is_press){
+                      if (ctrlkey_down){
+                          mouse_position[X] -= stride * zoom;
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                          else{
+                              mouse_position[X] += stride * zoom;
+                          }
+                      }
+                      else if (altkey_down){
+                          roi_radius = MAX(0,roi_radius-1);
+                          draw_cursor(main_window, mouse_position, roi_radius * zoom);
+                          if (in_subwindow(mouse_position,image_subwindow)){
+                              must_evaluate_pixel = TRUE;
+                          }
+                      }
+                      else{
+                          frame--;
+                          if (frame < 0) frame = user_frame_count-1;
+                          if (!shiftkey_down){
+                              image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                              must_redraw_main = TRUE;
+                              if (in_subwindow(mouse_position,image_subwindow)){
+                                  must_evaluate_pixel = TRUE;
+                              }
+                          }
+                          else{
+                              update_needed = TRUE;
+                              must_write_scale = TRUE;
+                          }
+                      }
+                  }
+                  break;
+
+#if DO_RESAMPLE
+              case XK_I:
+              case XK_i:
+                  resample_function = interpolateImage;
+                  must_redraw_main = TRUE;
+                  break;
+
+              case XK_N:
+              case XK_n:
+                  resample_function = nearestNeighbour;
+                  must_redraw_main = TRUE;
+                  break;
+#endif /* DO_RESAMPLE */
+
+              case XK_C:
+              case XK_c:
+                  break;
+
+              case XK_D:
+              case XK_d:
+                  if (!is_press) {
+                      break;
+                  }
+                  if (user_frame_count > 1 && dynamic_window == NULL) {
+                      dynamic_window = create_window(window_title,
+                                                     frame_time[0],
+                                                     frame_time[user_frame_count-1],
+                                                     min,
+                                                     max,
+                                                     axes,
+                                                     DYNAMIC,
+                                                     dynamic_origin,
+                                                     dynamic_size);
+                  }
+                  else if (dynamic_window != NULL && !dynamic_frozen){
+                      destroy_window(dynamic_window);
+                      dynamic_window = NULL;
+                  }
+                  break;
+                  
+              case XK_G:
+              case XK_g:
+                  if (is_press){
+                      present_scale = gray;
+                      must_change_color_map = TRUE;
+                  }
+                  break;
       
-    case QKEY:
-    case ESCKEY:
-      if (valuator){
-        getdev(2,mouse,mouse_position);
-        mouse_position[X] -= main_origin[X];
-        mouse_position[Y] -= main_origin[Y];
-        if (in_subwindow(mouse_position,image_subwindow) || 
-            in_subwindow(mouse_position,scale_subwindow))
-          quit = TRUE;
+              case XK_H:
+              case XK_h:
+                  if (is_press){
+                      present_scale = hotmetal;
+                      must_change_color_map = TRUE;
+                  }
+                  break;
+
+              case XK_M:
+              case XK_m:
+                  if (is_press){
+                      if (keysym == XK_M){
+                          frame = max_frame;
+                          slice = max_slice;
+                      }
+                      else{
+                          frame = min_frame;
+                          slice = min_slice;
+                      }
+                      image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                      must_redraw_main = TRUE;
+                  }
+                  break;
+
+              case XK_P:
+              case XK_p:
+                  if (!is_press) {
+                      break;
+                  }
+                  if (profile_window == NULL) {
+                      profile_window = create_window(window_title,
+                                                     0,
+                                                     MAX(image_width,image_height),
+                                                     min,
+                                                     max,
+                                                     axes,
+                                                     PROFILE,
+                                                     profile_origin,
+                                                     profile_size);
+                  }
+                  else if (profile_window != NULL && !profile_frozen) {
+                      destroy_window(profile_window);
+                      profile_window = NULL;
+                  }
+                  break;
+
+              case XK_R:
+              case XK_r:
+                  if (is_press) {
+                      if (keysym == XK_R){
+                          zoom = initial_zoom;
+                          draw_origin[X] = last_origin[X] = 0;
+                          draw_origin[Y] = last_origin[Y] = 0;	       
+                          must_redraw_main = TRUE;
+                      }
+                      else{    
+                          low = 0.0; high = 1.0;
+                          must_change_color_map = TRUE;
+                          must_write_scale = TRUE;	
+                      }
+                  }
+                  break;
+      
+              case XK_S:
+              case XK_s:
+                  if (is_press){
+                      present_scale = spectral;
+                      must_change_color_map = TRUE;
+                  }
+                  break;
+      
+              case XK_T:
+              case XK_t:
+                  break;
+      
+              case XK_X:
+              case XK_x:
+                  if (is_press) axes ^= XAXIS;
+                  break;
+      
+              case XK_Y:
+              case XK_y:
+                  if (is_press) axes ^= YAXIS;
+                  break;
+      
+              case XK_Z:
+              case XK_z:
+                  if (is_press) axes ^= ZAXIS;
+                  break;
+      
+              case XK_minus:
+                  if (is_press && in_subwindow(mouse_position,image_subwindow)) {
+                      if (zoom >= 2.0){
+                          evaluate_position[X] = (mouse_position[X] - draw_origin[X]) / zoom;
+                          evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y]) / zoom;
+                          zoom--;
+                          last_origin[X] = draw_origin[X] = mouse_position[X] - zoom * evaluate_position[X];
+                          last_origin[Y] = draw_origin[Y] = mouse_position[Y] - zoom * evaluate_position[Y];
+                          must_redraw_main = TRUE;
+                      }
+                  }
+                  break;
+      
+              case XK_plus:
+                  if (is_press && in_subwindow(mouse_position,image_subwindow)){
+                      evaluate_position[X] = (mouse_position[X] - draw_origin[X]) / zoom;
+                      evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y]) / zoom;
+                      zoom++;
+                      last_origin[X] = draw_origin[X] = mouse_position[X] - zoom * evaluate_position[X];
+                      last_origin[Y] = draw_origin[Y] = mouse_position[Y] - zoom * evaluate_position[Y];
+                      must_redraw_main = TRUE;
+                  }
+                  break;
+      
+              case XK_space:
+                  if (is_press && evaluating_pixel && dynamic_window != NULL) {
+                      must_evaluate_pixel = TRUE;
+                      roi_dump = TRUE;
+                  }
+                  break;
+      
+              case XK_Q:
+              case XK_q:
+              case XK_Escape:
+                  quit = TRUE;
+                  break;
+                  
+              case XK_Shift_L:
+              case XK_Shift_R:
+                  if (is_press){
+                      shiftkey_down = TRUE;
+                      if (ctrlkey_down) stride = 4;
+                  }
+                  else{
+                      shiftkey_down = FALSE;
+                      if (ctrlkey_down) stride = 1;
+                      if (update_needed){
+                          update_needed = FALSE;
+                          image = dynamic_volume + (slice * user_frame_count + frame) * image_size;
+                          must_redraw_main = TRUE;
+                          must_write_scale = TRUE;
+                      }
+                  }
+                  break;
+      
+              case XK_Control_L:
+              case XK_Control_R:
+                  if (is_press && !ctrlkey_down){
+                      ctrlkey_down = TRUE;
+                      if (shiftkey_down) 
+                          stride = 4;
+                      if (in_subwindow(mouse_position,image_subwindow)) {
+#if 0
+                          curstype(C16X1);
+                          defcursor(1,glyph);
+                          setcursor(1,0,0);
+#endif
+                          draw_cursor(main_window, mouse_position, roi_radius * zoom);
+                          evaluating_pixel = TRUE;
+                      }
+                  }
+                  else if (!is_press && ctrlkey_down) {
+                      ctrlkey_down = FALSE;
+                      if (shiftkey_down) 
+                          stride = 1;
+                      if (!altkey_down) {
+                          must_syncronize_mouse = FALSE;
+                          get_mouse_ptr(main_window, mouse_position);
+                          erase_cursor(main_window);
+#if 0
+                          setcursor(0,0,0);
+#endif
+                          evaluating_pixel = FALSE;
+                      }
+                      else{
+                          must_syncronize_mouse = TRUE;
+                      }
+                  }
+                  break;
+      
+              case XK_Alt_L:
+              case XK_Alt_R:
+                  if (is_press && !altkey_down && !evaluating_pixel){
+                      altkey_down = TRUE;
+                      if (in_subwindow(mouse_position,image_subwindow)){
+#if 0
+                          curstype(C16X1);
+                          defcursor(1,glyph);
+                          setcursor(1,0,0);
+#endif
+                          draw_cursor(main_window, mouse_position, roi_radius * zoom);
+                          evaluating_pixel = TRUE;
+                      }
+                  }
+                  else if (!is_press && altkey_down){
+                      altkey_down = FALSE;
+                      if (!ctrlkey_down) {
+                          if (must_syncronize_mouse){
+                              must_syncronize_mouse = FALSE;
+                              get_mouse_ptr(main_window, mouse_position);
+                          }
+                          erase_cursor(main_window);
+#if 0
+                          setcursor(0,0,0);
+#endif
+                          evaluating_pixel = FALSE;
+                      }
+                  }
+                  break;
+      
+              default:
+                  fprintf(stderr, "Unknown keysym %d\n", keysym);
+                  break;
+              }
+          }
+          break;
+
+      case MotionNotify:
+          mouse_position[X] = event.xmotion.x;
+          mouse_position[Y] = FLIPY(main_window, event.xmotion.y);
+
+          if (evaluating_pixel) {
+              must_evaluate_pixel = TRUE;
+          }
+          else if (moving_origin) {
+              draw_origin[X] = last_origin[X] + (mouse_position[X] - start_origin[X]);
+              draw_origin[Y] = last_origin[Y] + (mouse_position[Y] - start_origin[Y]);
+              must_redraw_main = TRUE;
+          }
+          else if (moving_scale) {
+              translate_scale(mouse_position[Y],
+                              &low, &high, moving_color);
+              must_change_color_map = TRUE;
+              must_write_scale = TRUE;
+          }
+          else if (moving_bottom_scale) {
+              new_scale_slope(mouse_position[Y],
+                              &low, &high, TOP, moving_color);
+              must_change_color_map = TRUE;
+              must_write_scale = TRUE;
+          }
+          else if (moving_top_scale) {
+              new_scale_slope(mouse_position[Y],
+                              &low, &high, BOTTOM, moving_color);
+              must_change_color_map = TRUE;
+              must_write_scale = TRUE;
+          }
+          break;
+
+      default:
+          fprintf(stderr, "unknown event type: %d\n", event.type);
+          break;
       }
-      break;
-    }
+
+#if 0
+      if (must_write_scale || 
+          must_change_color_map ||
+          must_redraw_main ||
+          must_evaluate_pixel) {
+          force_redraw(main_window);
+      }
+      else if (must_redraw_profile && profile_window != NULL) {
+          force_redraw(profile_window);
+      }
+      else if (must_redraw_dynamic && dynamic_window != NULL) {
+          force_redraw(dynamic_window);
+      }
+
+      if (event.type != Expose) {
+          continue;
+      }
+#endif
+      if (must_change_color_map) {
+          must_change_color_map = FALSE;
+          change_color_map(present_scale, low, high);
+          must_redraw_main = TRUE;
+      }
+      
+      if (must_redraw_main) {
+          must_redraw_main = FALSE;
+          draw_new_slice(main_window, 
+                         draw_origin,
+                         frame,
+                         slice,
+                         *rframes,
+                         *rslices,
+                         image_width,
+                         image_height,
+                         min,
+                         max,
+                         low,
+                         high,
+                         image,
+                         clipping_buffer,
+                         zoom,
+                         color_bar,
+                         NOT_REDRAW_ONLY);
+      }
+      
+      if (must_write_scale) {
+          must_write_scale = FALSE;
+          frontbuffer(main_window, 1);
+          write_scale(main_window, low, high, frame, slice, *rframes, *rslices);
+          frontbuffer(main_window, 0);
+      }
+
+      if (must_redraw_profile) {
+          must_redraw_profile = FALSE;
+          draw_profile(profile_window, 
+                       NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
+                       NIL,NIL, axes, NOT_INITIALIZE, REDRAW_ONLY);
+      }
+      
+      if (must_redraw_dynamic) {
+          must_redraw_dynamic = FALSE;
+          draw_dynamic(dynamic_window, 
+                       NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,NIL,
+                       NIL,NIL,NOT_INITIALIZE,REDRAW_ONLY, roi_dump);
+      }
+      
+      if (must_evaluate_pixel) {
+          must_evaluate_pixel = FALSE;
+          if (evaluating_pixel) 
+              draw_cursor(main_window, mouse_position, roi_radius * zoom);
+          evaluate_position[X] = (mouse_position[X] - draw_origin[X])/zoom;
+          evaluate_position[Y] = (mouse_position[Y] - draw_origin[Y])/zoom;
+          evaluate_pixel(evaluate_position,
+                         image,
+                         frame,
+                         slice,
+                         cfact,
+                         cterm,
+                         image_width,
+                         image_height,
+                         image_size,
+                         roi_radius,
+                         (profile_window != NULL),
+                         profile_frozen,
+                         (dynamic_window != NULL),
+                         dynamic_frozen,
+                         axes,
+                         main_window,
+                         profile_window,
+                         dynamic_window,
+                         roi_dump);
+          if (roi_dump) roi_dump = FALSE;
+      }
+
   }
-  
-  gexit();
+
+  if (profile_window != NULL) {
+      destroy_window(profile_window);
+      profile_window = NULL;
+  }
+  if (dynamic_window != NULL) {
+      destroy_window(dynamic_window);
+      dynamic_window = NULL;
+  }
+  if (main_window != NULL) {
+      destroy_window(main_window);
+      main_window = NULL;
+  }
+  xexit();
   return(NORMAL_STATUS);
   
 }

@@ -1,5 +1,10 @@
-New in 1.0.01
+New in 1.0.02
 -------------
 * Man page
+* Improved installation
+* Complete rewritten for Xlib 
+
+New in 1.0.01
+-------------
 * Ported to Ygl/X11
 * autoconfiscated

@@ -9,14 +9,6 @@ Installation of postf
 Postf is a simple display program for medical image files, originally
 developed by Gabriel C. Léger at the MNI's McConnell Brain Imaging Centre.
 
-Before you can install postf, you must download and install the "Ygl"
-package which emulates the SGI Graphics Library (GL).  As of this
-writing, Ygl is available here:
-
-http://www.thp.uni-duisburg.de/Ygl/
-
-Be sure to enable double-buffering on your system.
-
 The rest of these instructions are generic.
 
    The `configure' shell script attempts to guess correct values for
