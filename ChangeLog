@@ -1,8 +1,11 @@
+2005-05-25 Bert Vincent <bert@bic.mni.mcgill.ca>
+	* Minor build tweaks.
+	
 2005-03-17 Bert Vincent <bert@bic.mni.mcgill.ca>
 	* Remove dependencies on volume_io, since it is no longer used in
 	any way.
 	* Add -Wall to AM_CFLAGS and get rid of all resulting warnings
-	* Fix all of Christopher Bailey's bugs:  Raw ROI circle correctly,
+	* Fix all of Christopher Bailey's bugs:  Draw ROI circle correctly,
 	fix color bar, and avoid compilation problem when ARGV_VERINFO is
 	not defined, as in MINC 1.2 and earlier.
 	

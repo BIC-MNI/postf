@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.8  2005-03-17 17:57:22  bert
+   @MODIFIED   : Revision 1.9  2005-08-17 23:17:41  bert
+   @MODIFIED   : Minor updates and tweaks
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.8  2005/03/17 17:57:22  bert
    @MODIFIED   : Minor changes to completely remove need for volume_io
    @MODIFIED   :
    @MODIFIED   : Revision 1.7  2005/03/17 17:27:27  bert
@@ -126,7 +129,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.8 2005-03-17 17:57:22 bert Exp $";
+static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.9 2005-08-17 23:17:41 bert Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -183,6 +186,9 @@ typedef unsigned char *(*resample_func_t) (unsigned short *, int, int, int, int,
 
 resample_func_t resample_function;
 int debug_level = 2;
+#define FLOOR(x) ((int) floor(x))
+#define ROUND(x) FLOOR((double) (x) + 0.5)
+
 #endif /* DO_RESAMPLE */
 
 /*
@@ -1539,7 +1545,7 @@ interpolateImage (unsigned short *refImage,
       xref1 = refImage + yOffset + bx[x];
       xref2 = xref1 + rw;
 
-      switch ((bx[x] + 1 == rw) + (by[iy] + 1 == rh)<<1) {
+      switch ((bx[x] + 1 == rw) + ((by[iy] + 1 == rh) << 1)) {
 
       case 0:
         x1 = *xref1 + wx[x] * (*(xref1 + 1) - *xref1);
@@ -3291,7 +3297,10 @@ main(int argc, char *argv[])
               }
               break;
           default:
-              fprintf(stderr, "Unknown mouse button %d\n", event.xbutton.button);
+              if (debug) {
+                  fprintf(stderr, "Unknown mouse button %d\n", 
+                          event.xbutton.button);
+              }
               break;
           }
           break;
@@ -3723,7 +3732,9 @@ main(int argc, char *argv[])
                   break;
       
               default:
-                  fprintf(stderr, "Unknown keysym %d\n", (int) keysym);
+                  if (debug) {
+                      fprintf(stderr, "Unknown keysym %d\n", (int) keysym);
+                  }
                   break;
               }
           }
@@ -3766,7 +3777,9 @@ main(int argc, char *argv[])
           break;
 
       default:
-          fprintf(stderr, "unknown event type: %d\n", event.type);
+          if (debug) {
+              fprintf(stderr, "Unknown event type: %d\n", event.type);
+          }
           break;
       }
 
