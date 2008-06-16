@@ -1,3 +1,7 @@
+2008-06-16 Andrew L Janke <a.janke@gmail.com>
+	* postf.c: added some 64 bit bug fixes from Alexandre
+	* configure.ac: bumped version number
+
 2005-05-25 Bert Vincent <bert@bic.mni.mcgill.ca>
 	* Minor build tweaks.
 	

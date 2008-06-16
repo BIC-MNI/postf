@@ -1,12 +1,11 @@
 %product postf
 %copyright 1992-2004 Gabriel C. Leger
 %vendor McConnell Brain Imaging Centre
-%packager Robert Vincent <bert@bic.mni.mcgill.ca>
+%packager Andrew Janke <a.janke@gmail.com>
 %license COPYING
 %readme README
-%description Extra minc package
+%description postf is made for displaying 4D minc data, this is typically time series fmri data or the likes
 %version @VERSION@
-%requires netcdf
 %requires minc
 %requires bicpl
 

@@ -9,7 +9,10 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.9  2005-08-17 23:17:41  bert
+   @MODIFIED   : Revision 1.10  2008-06-16 12:15:10  rotor
+   @MODIFIED   :  * added a few 64 bit bug fixes from Alexandre
+   @MODIFIED   :
+   @MODIFIED   : Revision 1.9  2005/08/17 23:17:41  bert
    @MODIFIED   : Minor updates and tweaks
    @MODIFIED   :
    @MODIFIED   : Revision 1.8  2005/03/17 17:57:22  bert
@@ -129,7 +132,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.9 2005-08-17 23:17:41 bert Exp $";
+static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.10 2008-06-16 12:15:10 rotor Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -307,7 +310,7 @@ int _xScreen;
 Visual *_xVisual;
 Colormap _xColormap;
 int _xDepth;
-unsigned long *_xmap = NULL;
+unsigned int *_xmap = NULL;
 unsigned long TextColor, 
     ProfileBackgroundColor,
     ProfileXColor, 
@@ -1269,7 +1272,7 @@ change_color_map(void (*map)(float, float *), float low, float high)
         XFreeColors(_xDisplay, _xColormap, _xmap, index_max - index_min, 0);
         free(_xmap);
     }
-    _xmap = malloc(sizeof(unsigned long) * (index_max - index_min + 1));
+    _xmap = malloc(sizeof(unsigned int) * (index_max - index_min + 1));
     if (_xmap == NULL) {
         exit(-1);
     }
@@ -2406,7 +2409,7 @@ draw_image(struct postf_wind *wnd_ptr,
     XImage *xi;
     int x, y;
     unsigned short *tptr;
-    unsigned long *lptr;
+    unsigned int *lptr;
     double izoom;               /* inverse of zoom */
 
     XSetForeground(_xDisplay, wnd_ptr->gc, ImageBackgroundColor);
@@ -2493,13 +2496,13 @@ draw_image(struct postf_wind *wnd_ptr,
         fprintf(stderr, "yikes: can't allocate memory.\n");
         exit(1);
     }
-    lptr = (unsigned long *) xi->data;
+    lptr = (unsigned int *) xi->data;
     izoom = 1.0 / zoom;
 
     for (y = new_height-1; y >= 0; y--) {
         unsigned short *xptr = &tptr[image_width * (int)(izoom * y)];
         for (x = 0; x < new_width; x++) {
-            *lptr++ = xclr(xptr[(int)(izoom * x)]);
+            *lptr++ = (unsigned int)xclr(xptr[(int)(izoom * x)]);
         }
     }
 #endif /* DO_RESAMPLE */
