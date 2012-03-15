@@ -9,7 +9,7 @@
    @CALLS      : none
    @CREATED    : January 25, 1993 (Gabriel Leger)
    @MODIFIED   : $Log: postf.c,v $
-   @MODIFIED   : Revision 1.10  2008-06-16 12:15:10  rotor
+   @MODIFIED   : Revision 1.10  2008/06/16 12:15:10  rotor
    @MODIFIED   :  * added a few 64 bit bug fixes from Alexandre
    @MODIFIED   :
    @MODIFIED   : Revision 1.9  2005/08/17 23:17:41  bert
@@ -132,7 +132,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.10 2008-06-16 12:15:10 rotor Exp $";
+static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.10 2008/06/16 12:15:10 rotor Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
