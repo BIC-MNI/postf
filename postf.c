@@ -132,7 +132,7 @@
 #define DO_RESAMPLE 0
 #endif
 
-static const char rcsid[] = "$Header: /private-cvsroot/visualization/postf/postf.c,v 1.10 2008/06/16 12:15:10 rotor Exp $";
+static const char rcsid[] = "$Header: /static-cvsroot/visualization/postf/postf.c,v 1.10 2008/06/16 12:15:10 rotor Exp $";
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -189,8 +189,8 @@ typedef unsigned char *(*resample_func_t) (unsigned short *, int, int, int, int,
 
 resample_func_t resample_function;
 int debug_level = 2;
-#define FLOOR(x) ((int) floor(x))
-#define ROUND(x) FLOOR((double) (x) + 0.5)
+#define VIO_FLOOR(x) ((int) floor(x))
+#define VIO_ROUND(x) VIO_FLOOR((double) (x) + 0.5)
 
 #endif /* DO_RESAMPLE */
 
@@ -1435,12 +1435,12 @@ nearestNeighbour(unsigned short *refImage,
   }
     
   for (x = 0; x < nw; x++) {
-    nx[x] = ROUND ( x * xFactor );
+    nx[x] = VIO_ROUND ( x * xFactor );
     if (debug_level > 2) (void) printf ("x: %03d, nx: %03d\n", x, nx[x]);
   }
 
   for (y = 0; y < nh; y++) {
-    ny[y] = ROUND ( y * yFactor );
+    ny[y] = VIO_ROUND ( y * yFactor );
     if (debug_level > 2) (void) printf ("y: %03d, ny: %03d\n", y, ny[y]);
   }
 
@@ -1553,15 +1553,15 @@ interpolateImage (unsigned short *refImage,
       case 0:
         x1 = *xref1 + wx[x] * (*(xref1 + 1) - *xref1);
         x2 = *xref2 + wx[x] * (*(xref2 + 1) - *xref2);
-        *iptr++ = xclr(ROUND(x1 + wy[iy] * (x2 - x1)));
+        *iptr++ = xclr(VIO_ROUND(x1 + wy[iy] * (x2 - x1)));
         break;
 
       case 1:
-        *iptr++ = xclr(ROUND(*xref1 + wy[iy] * (*xref2 - *xref1)));
+        *iptr++ = xclr(VIO_ROUND(*xref1 + wy[iy] * (*xref2 - *xref1)));
         break;
 
       case 2:
-        *iptr++ = xclr(ROUND(*xref1 + wx[x] * (*(xref1 + 1) - *xref1)));
+        *iptr++ = xclr(VIO_ROUND(*xref1 + wx[x] * (*(xref1 + 1) - *xref1)));
         break;
 
       case 3:
