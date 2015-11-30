@@ -625,7 +625,7 @@ MincInfo *open_minc_file(char *minc_filename, _BOOL progress, _BOOL debug)
     fprintf(stderr, " Minc filename: %s\n", MincFile->Name);
   }
   
-  ncopts = 0;
+  set_ncopts(0);
   MincFile->CdfId = miopen(MincFile->Name, NC_NOWRITE);
   if (MincFile->CdfId == MI_ERROR){
     return(NULL);
