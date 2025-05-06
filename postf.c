@@ -310,7 +310,7 @@ int _xScreen;
 Visual *_xVisual;
 Colormap _xColormap;
 int _xDepth;
-unsigned int *_xmap = NULL;
+unsigned long int *_xmap = NULL;
 unsigned long TextColor, 
     ProfileBackgroundColor,
     ProfileXColor, 
@@ -1272,7 +1272,7 @@ change_color_map(void (*map)(float, float *), float low, float high)
         XFreeColors(_xDisplay, _xColormap, _xmap, index_max - index_min, 0);
         free(_xmap);
     }
-    _xmap = malloc(sizeof(unsigned int) * (index_max - index_min + 1));
+    _xmap = malloc(sizeof(unsigned long int) * (index_max - index_min + 1));
     if (_xmap == NULL) {
         exit(-1);
     }
