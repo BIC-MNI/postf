@@ -1,0 +1,34 @@
+# Citation metadata for postf (Citation File Format, https://citation-file-format.github.io/).
+# The author list comes from the commit history and from the history comments in the files.
+
+cff-version: 1.2.0
+title: postf
+message: >-
+  If you use this software, please cite it using the metadata from this file.
+type: software
+authors:
+  - given-names: Gabriel C.
+    family-names: Léger
+  - given-names: Robert D.
+    family-names: Vincent
+  - given-names: Vladimir
+    family-names: Fonov
+    email: vladimir.fonov@gmail.com
+    affiliation: McGill University
+    orcid: "https://orcid.org/0000-0003-3402-7749"
+  - given-names: Andrew L.
+    family-names: Janke
+    orcid: "https://orcid.org/0000-0003-0547-5171"
+  - given-names: Peter
+    family-names: Neelin
+  - alias: "raph-rc"
+repository-code: "https://github.com/BIC-MNI/postf"
+abstract: >-
+  postf: interactive viewer for statistical results in MINC volumes.
+keywords:
+  - MINC
+  - medical imaging
+  - neuroimaging
+  - visualization
+  - PET
+license-url: "https://github.com/BIC-MNI/postf/blob/master/COPYING"
